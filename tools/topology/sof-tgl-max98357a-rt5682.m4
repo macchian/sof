@@ -17,7 +17,7 @@ include(`common/tlv.m4')
 include(`sof/tokens.m4')
 
 # Include Tigerlake DSP configuration
-include(`platform/intel/tgl.m4')
+include(`platform/intel/'PLATFORM`.m4')
 include(`platform/intel/dmic.m4')
 DEBUG_START
 
@@ -68,6 +68,12 @@ MUXDEMUX_CONFIG(demux_priv_1, 2, LIST(`	', `matrix1,', `matrix2'))
 # PCM5 ----> volume -----> iDisp4
 # PCM99 <---- volume <---- DMIC01 (dmic 48k capture)
 # PCM100 <---- kpb <---- DMIC16K (dmic 16k capture)
+
+ifdef(`AMP_SSP',`',`fatal_error(note: Define AMP_SSP for speaker amp SSP Index)')
+# SSP related
+define(`SSP_INDEX', AMP_SSP)
+#define SSP BE dai_link name
+define(`SSP_NAME', concat(concat(`SSP', AMP_SSP),`-Codec'))
 
 # Define pipeline id for sof-tgl-CODEC-rt5682.m4
 # to generate dmic setting with kwd when we have dmic
@@ -158,12 +164,28 @@ dnl     frames, deadline, priority, core)
 # playback DAI is SSP1 using 2 periods
 # Buffers use s16le format, with 48 frame per 1000us on core 0 with priority 0
 DAI_ADD(sof/pipe-dai-playback.m4,
-	1, SSP, 1, SSP1-Codec,
+	1, SSP, SSP_INDEX, SSP_NAME,
 	PIPELINE_SOURCE_1, 2, FMT,
 	1000, 0, 0, SCHEDULE_TIME_DOMAIN_TIMER)
 
+ifelse(CODEC, `MAX98390', `
+# Low Latency capture pipeline 9 on PCM 6 using max 2 channels of s32le.
+# Schedule 48 frames per 1000us deadline on core 0 with priority 0
+PIPELINE_PCM_ADD(sof/pipe-volume-capture.m4,
+        9, 6, 2, s32le,
+        1000, 0, 0,
+        48000, 48000, 48000)
+
+# playback DAI is SSP1 using 2 periods
+# Buffers use s16le format, with 48 frame per 1000us on core 0 with priority 0
+DAI_ADD(sof/pipe-dai-capture.m4,
+        9, SSP, SSP_INDEX, SSP_NAME,
+        PIPELINE_SINK_9, 2, FMT,
+        1000, 0, 0, SCHEDULE_TIME_DOMAIN_TIMER)
+',
+`
 # currently this dai is here as "virtual" capture backend
-W_DAI_IN(SSP, 1, SSP1-Codec, FMT, 3, 0)
+W_DAI_IN(SSP, SSP_INDEX, SSP_NAME, FMT, 3, 0)
 
 # Capture pipeline 9 from demux on PCM 6 using max 2 channels of s32le.
 PIPELINE_PCM_ADD(sof/pipe-passthrough-capture-sched.m4,
@@ -192,6 +214,7 @@ SectionGraph."PIPE_CAP_VIRT" {
 		dapm(ECHO REF 9, SSP1.IN)
 	]
 }
+')
 
 # playback DAI is SSP0 using 2 periods
 # Buffers use s24le format, with 48 frame per 1000us on core 0 with priority 0
@@ -237,7 +260,7 @@ DAI_ADD(sof/pipe-dai-playback.m4,
 
 # PCM Low Latency, id 0
 dnl PCM_PLAYBACK_ADD(name, pcm_id, playback)
-PCM_PLAYBACK_ADD(Speakers, 0, PIPELINE_PCM_1)
+PCM_PLAYBACK_ADD(Speaker, 0, PIPELINE_PCM_1)
 PCM_DUPLEX_ADD(Headset, 1, PIPELINE_PCM_2, PIPELINE_PCM_3)
 PCM_PLAYBACK_ADD(HDMI1, 2, PIPELINE_PCM_5)
 PCM_PLAYBACK_ADD(HDMI2, 3, PIPELINE_PCM_6)
@@ -256,7 +279,7 @@ dnl mclk_id is optional
 dnl ssp1-maxmspk
 
 # SSP 1 (ID: 7)
-DAI_CONFIG(SSP, 1, 7, SSP1-Codec,
+DAI_CONFIG(SSP, SSP_INDEX, 7, SSP_NAME,
 ifelse(
 	CODEC, `MAX98357A', `
 	SSP_CONFIG(I2S, SSP_CLOCK(mclk, 19200000, codec_mclk_in),
@@ -270,6 +293,12 @@ ifelse(
 		SSP_CLOCK(fsync, 48000, codec_slave),
 		SSP_TDM(4, 25, 3, 15),
 		SSP_CONFIG_DATA(SSP, 1, 24)))',
+	CODEC, `MAX98390', `
+	SSP_CONFIG(DSP_B, SSP_CLOCK(mclk, 19200000, codec_mclk_in),
+		SSP_CLOCK(bclk, 6144000, codec_slave),
+		SSP_CLOCK(fsync, 48000, codec_slave),
+		SSP_TDM(4, 32, 3, 15),
+		SSP_CONFIG_DATA(SSP, SSP_INDEX, 32)))',
 	)
 
 # SSP 0 (ID: 0)
