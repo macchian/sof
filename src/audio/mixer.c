@@ -217,22 +217,6 @@ static int mixer_params(struct comp_dev *dev,
 	return 0;
 }
 
-static int mixer_source_status_count(struct comp_dev *mixer, uint32_t status)
-{
-	struct comp_buffer *source;
-	struct list_item *blist;
-	int count = 0;
-
-	/* count source with state == status */
-	list_for_item(blist, &mixer->bsource_list) {
-		source = container_of(blist, struct comp_buffer, sink_list);
-		if (source->source->state == status)
-			count++;
-	}
-
-	return count;
-}
-
 /* used to pass standard and bespoke commands (with data) to component */
 static int mixer_trigger_common(struct comp_dev *dev, int cmd)
 {
@@ -271,16 +255,6 @@ static int mixer_trigger_common(struct comp_dev *dev, int cmd)
 	if (dir == SOF_IPC_STREAM_CAPTURE)
 		return ret;
 
-	/* don't stop mixer on pause or if at least one source is active/paused */
-	if (cmd == COMP_TRIGGER_PAUSE ||
-	    (cmd == COMP_TRIGGER_STOP &&
-	     (mixer_source_status_count(dev, COMP_STATE_ACTIVE) ||
-	     mixer_source_status_count(dev, COMP_STATE_PAUSED)))) {
-		dev->state = COMP_STATE_ACTIVE;
-		comp_writeback(dev);
-		ret = PPL_STATUS_PATH_STOP;
-	}
-
 	return ret;
 }
 
@@ -300,7 +274,6 @@ static int mixer_copy(struct comp_dev *dev)
 	uint32_t frames = INT32_MAX;
 	uint32_t source_bytes;
 	uint32_t sink_bytes;
-	uint32_t sink_flags, source_flags;
 
 	comp_dbg(dev, "mixer_copy()");
 
@@ -328,33 +301,33 @@ static int mixer_copy(struct comp_dev *dev)
 	/* write zeros if all sources are inactive */
 	if (num_mix_sources == 0) {
 		uint32_t free_frames;
-		buffer_lock(sink, &sink_flags);
+		sink = buffer_acquire_irq(sink);
 		free_frames = audio_stream_get_free_frames(&sink->stream);
 		frames = MIN(frames, free_frames);
 		sink_bytes = frames * audio_stream_frame_bytes(&sink->stream);
-		buffer_unlock(sink, sink_flags);
+		sink = buffer_release_irq(sink);
 
 		if (!audio_stream_set_zero(&sink->stream, sink_bytes)) {
-			buffer_writeback(sink, sink_bytes);
+			buffer_stream_writeback(sink, sink_bytes);
 			comp_update_buffer_produce(sink, sink_bytes);
 		}
 
 		return 0;
 	}
 
-	buffer_lock(sink, &sink_flags);
+	sink = buffer_acquire_irq(sink);
 
 	/* check for underruns */
 	for (i = 0; i < num_mix_sources; i++) {
 		uint32_t avail_frames;
-		buffer_lock(sources[i], &source_flags);
+		sources[i] = buffer_acquire_irq(sources[i]);
 		avail_frames = audio_stream_avail_frames(sources_stream[i],
 							 &sink->stream);
 		frames = MIN(frames, avail_frames);
-		buffer_unlock(sources[i], source_flags);
+		sources[i] = buffer_release_irq(sources[i]);
 	}
 
-	buffer_unlock(sink, sink_flags);
+	sink = buffer_release_irq(sink);
 
 	/* Every source has the same format, so calculate bytes based
 	 * on the first one.
@@ -367,10 +340,10 @@ static int mixer_copy(struct comp_dev *dev)
 
 	/* mix streams */
 	for (i = num_mix_sources - 1; i >= 0; i--)
-		buffer_invalidate(sources[i], source_bytes);
+		buffer_stream_invalidate(sources[i], source_bytes);
 	md->mix_func(dev, &sink->stream, sources_stream, num_mix_sources,
 		     frames);
-	buffer_writeback(sink, sink_bytes);
+	buffer_stream_writeback(sink, sink_bytes);
 
 	/* update source buffer pointers */
 	for (i = num_mix_sources - 1; i >= 0; i--)
@@ -479,9 +452,26 @@ static int mixer_prepare_common(struct comp_dev *dev)
  * triggered second time.
  */
 #if CONFIG_IPC_MAJOR_3
+static int mixer_source_status_count(struct comp_dev *mixer, uint32_t status)
+{
+	struct comp_buffer *source;
+	struct list_item *blist;
+	int count = 0;
+
+	/* count source with state == status */
+	list_for_item(blist, &mixer->bsource_list) {
+		source = container_of(blist, struct comp_buffer, sink_list);
+		if (source->source->state == status)
+			count++;
+	}
+
+	return count;
+}
+
 static int mixer_trigger(struct comp_dev *dev, int cmd)
 {
 	int dir = dev->pipeline->source_comp->direction;
+	int ret;
 
 	comp_dbg(dev, "mixer_trigger()");
 
@@ -491,7 +481,21 @@ static int mixer_trigger(struct comp_dev *dev, int cmd)
 		    mixer_source_status_count(dev, COMP_STATE_PAUSED))
 			return PPL_STATUS_PATH_STOP;
 
-	return mixer_trigger_common(dev, cmd);
+	ret = mixer_trigger_common(dev, cmd);
+	if (ret < 0)
+		return ret;
+
+	/* don't stop mixer on pause or if at least one source is active/paused */
+	if (cmd == COMP_TRIGGER_PAUSE ||
+	    (cmd == COMP_TRIGGER_STOP &&
+	     (mixer_source_status_count(dev, COMP_STATE_ACTIVE) ||
+	     mixer_source_status_count(dev, COMP_STATE_PAUSED)))) {
+		dev->state = COMP_STATE_ACTIVE;
+		comp_writeback(dev);
+		ret = PPL_STATUS_PATH_STOP;
+	}
+
+	return ret;
 }
 
 static int mixer_prepare(struct comp_dev *dev)
@@ -631,6 +635,7 @@ static int mixin_bind(struct comp_dev *dev, void *data)
 {
 	struct ipc4_module_bind_unbind *bu;
 	struct comp_buffer *source_buf;
+	struct comp_buffer *sink_buf;
 	struct comp_dev *sink;
 	int src_id, sink_id;
 
@@ -644,9 +649,9 @@ static int mixin_bind(struct comp_dev *dev, void *data)
 
 		sink = ipc4_get_comp_dev(sink_id);
 		list_for_item(blist, &sink->bsource_list) {
-			source_buf = container_of(blist, struct comp_buffer, sink_list);
-			if (source_buf->source == dev) {
-				pipeline_disconnect(sink, source_buf, PPL_CONN_DIR_BUFFER_TO_COMP);
+			sink_buf = container_of(blist, struct comp_buffer, sink_list);
+			if (sink_buf->source == dev) {
+				pipeline_disconnect(sink, sink_buf, PPL_CONN_DIR_BUFFER_TO_COMP);
 				break;
 			}
 		}
@@ -654,6 +659,7 @@ static int mixin_bind(struct comp_dev *dev, void *data)
 		source_buf = list_first_item(&dev->bsource_list, struct comp_buffer, sink_list);
 		pipeline_disconnect(dev, source_buf, PPL_CONN_DIR_BUFFER_TO_COMP);
 		pipeline_connect(sink, source_buf, PPL_CONN_DIR_BUFFER_TO_COMP);
+		pipeline_connect(dev, sink_buf, PPL_CONN_DIR_BUFFER_TO_COMP);
 	}
 
 	return 0;

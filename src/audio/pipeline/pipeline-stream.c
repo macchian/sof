@@ -383,7 +383,7 @@ int pipeline_trigger_run(struct pipeline *p, struct comp_dev *host, int cmd)
 			p->trigger.delay = (data.delay_ms * 1000 + p->period - 1) / p->period;
 			p->trigger.cmd = data.cmd;
 
-			return ret;
+			return 0;
 		}
 
 		list_init(&walk_ctx.pipelines);
@@ -396,6 +396,8 @@ int pipeline_trigger_run(struct pipeline *p, struct comp_dev *host, int cmd)
 		if (ret < 0)
 			pipe_err(p, "pipeline_trigger(): ret = %d, host->comp.id = %u, cmd = %d",
 				 ret, dev_comp_id(host), cmd);
+		else if (ret == PPL_STATUS_PATH_STOP)
+			ret = 0;
 
 		if (pipeline_is_timer_driven(p))
 			return ret;
@@ -431,7 +433,7 @@ static int pipeline_comp_timestamp(struct comp_dev *current,
 	    (dev_comp_type(current) == SOF_COMP_DAI ||
 	    dev_comp_type(current) == SOF_COMP_SG_DAI)) {
 		platform_dai_timestamp(current, ppl_data->posn);
-		return -1;
+		return PPL_STATUS_PATH_STOP;
 	}
 
 	return pipeline_for_each_comp(current, ctx, dir);
@@ -453,7 +455,9 @@ void pipeline_get_timestamp(struct pipeline *p, struct comp_dev *host,
 	data.start = host;
 	data.posn = posn;
 
-	walk_ctx.comp_func(host, NULL, &walk_ctx, host->direction);
+	if (walk_ctx.comp_func(host, NULL, &walk_ctx, host->direction) !=
+	    PPL_STATUS_PATH_STOP)
+		pipe_warn(p, "pipeline_get_timestamp(): DAI position update failed");
 
 	/* set timestamp resolution */
 	posn->timestamp_ns = p->period * 1000;

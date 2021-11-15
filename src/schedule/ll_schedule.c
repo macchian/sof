@@ -107,11 +107,6 @@ static void schedule_ll_task_update_start(struct ll_schedule_data *sch,
 static void schedule_ll_task_done(struct ll_schedule_data *sch,
 				  struct task *task)
 {
-	/* Remove from the task list, schedule_task_cancel() won't handle it again */
-	list_item_del(&task->list);
-
-	domain_unregister(sch->domain, task, atomic_sub(&sch->num_tasks, 1) - 1);
-
 	tr_info(&ll_tr, "task complete %p %pU", task, task->uid);
 	tr_info(&ll_tr, "num_tasks %d total_num_tasks %d",
 		atomic_read(&sch->num_tasks),
@@ -142,6 +137,10 @@ static void schedule_ll_tasks_execute(struct ll_schedule_data *sch)
 
 		/* do we need to reschedule this task */
 		if (task->state == SOF_TASK_STATE_COMPLETED) {
+			/*
+			 * keep the task in the list and the subsequent call to
+			 * schedule_ll_task_cancel() will clean it up.
+			 */
 			schedule_ll_task_done(sch, task);
 		} else {
 			/* update task's start time */
@@ -238,7 +237,8 @@ static void schedule_ll_tasks_run(void *data)
 	}
 
 	/* tasks on current core finished, re-enable domain on it */
-	domain_enable(domain, core);
+	if (atomic_read(&sch->num_tasks))
+		domain_enable(domain, core);
 
 	spin_unlock(&domain->lock);
 
@@ -329,7 +329,7 @@ static void schedule_ll_domain_clear(struct ll_schedule_data *sch,
 		domain_disable(domain, cpu_get_id());
 
 	/* unregister the task */
-	domain_unregister(domain, task, (uint32_t)atomic_read(&sch->num_tasks));
+	domain_unregister(domain, task, atomic_read(&sch->num_tasks));
 
 	tr_info(&ll_tr, "num_tasks %d total_num_tasks %d",
 		atomic_read(&sch->num_tasks),
@@ -570,17 +570,20 @@ out:
 	return 0;
 }
 
-static void scheduler_free_ll(void *data)
+static void scheduler_free_ll(void *data, uint32_t flags)
 {
 	struct ll_schedule_data *sch = data;
-	uint32_t flags;
+	uint32_t irq_flags;
 
-	irq_local_disable(flags);
+	if (flags & SOF_SCHEDULER_FREE_IRQ_ONLY)
+		return;
+
+	irq_local_disable(irq_flags);
 
 	notifier_unregister(sch, NULL,
 			    NOTIFIER_CLK_CHANGE_ID(sch->domain->clk));
 
-	irq_local_enable(flags);
+	irq_local_enable(irq_flags);
 }
 
 static void ll_scheduler_recalculate_tasks(struct ll_schedule_data *sch,
@@ -646,6 +649,7 @@ static const struct scheduler_ops schedule_ll_ops = {
 	.schedule_task_cancel	= schedule_ll_task_cancel,
 	.reschedule_task	= reschedule_ll_task,
 	.scheduler_free		= scheduler_free_ll,
+	.scheduler_restore	= NULL,
 	.schedule_task_running	= NULL,
 	.schedule_task_complete	= NULL,
 };

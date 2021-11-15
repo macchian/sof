@@ -13,7 +13,7 @@ SUPPORTED_PLATFORMS=()
 SUPPORTED_PLATFORMS+=(apl cnl icl tgl-h tgl)
 
 # NXP
-SUPPORTED_PLATFORMS+=(imx8 imx8x)
+SUPPORTED_PLATFORMS+=(imx8 imx8x imx8m)
 
 BUILD_JOBS=$(nproc --all)
 PLATFORMS=()
@@ -150,11 +150,8 @@ build_all()
 		case "$platform" in
 			apl)
 				PLAT_CONFIG='intel_adsp_cavs15'
-				# XCC build runs out of memory, tracked as
-				# https://github.com/thesofproject/sof/issues/4645
-				unset XTENSA_TOOLS_ROOT
-				#XTENSA_CORE="X4H3I16w2D48w3a_2017_8"
-				#XTENSA_TOOLS_VERSION="RG-2017.8-linux"
+				XTENSA_CORE="X4H3I16w2D48w3a_2017_8"
+				XTENSA_TOOLS_VERSION="RG-2017.8-linux"
 				;;
 			cnl)
 				PLAT_CONFIG='intel_adsp_cavs18'
@@ -180,6 +177,11 @@ build_all()
 				PLAT_CONFIG='nxp_adsp_imx8x'
 				RIMAGE_KEY='ignored for imx8x'
 				;;
+			imx8m)
+				PLAT_CONFIG='nxp_adsp_imx8m'
+				RIMAGE_KEY='ignored for imx8m'
+				;;
+
 			*)
 				echo "Unsupported platform: $platform"
 				exit 1
@@ -221,6 +223,8 @@ build_all()
 			"$bdir"/zephyr/smex_ep/build/smex \
 			       -l "$STAGING"/sof/sof-"$platform".ldc \
 			       "$bdir"/zephyr/zephyr.elf
+
+			download_missing_submodules
 
 			# Build rimage
 			RIMAGE_DIR=build-rimage
@@ -373,6 +377,12 @@ see https://docs.zephyrproject.org/latest/getting_started/index.html"
 		ln -s "$SOF_TOP" "${WEST_TOP}"/modules/audio/sof
 	}
 
+	test "${#PLATFORMS[@]}" -eq 0 || build_all
+}
+
+
+download_missing_submodules()
+{
 	# FIXME: remove this hack. Downloading and building should be
 	# kept separate but support for submodules in west is too
 	# recent, cannot rely on it yet.
@@ -391,8 +401,7 @@ see https://docs.zephyrproject.org/latest/getting_started/index.html"
 
 		git submodule update --init --recursive
 	)
-
-	test "${#PLATFORMS[@]}" -eq 0 || build_all
 }
+
 
 main "$@"
