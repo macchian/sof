@@ -193,7 +193,7 @@ DAI_CONFIG(SSP, 2, 1, SSP2-Codec,
 		SSP_CLOCK(bclk, 1920000, codec_slave),
 		SSP_CLOCK(fsync, 48000, codec_slave),
 		SSP_TDM(2, 20, 3, 3),
-		SSP_CONFIG_DATA(SSP, 2, 16, 1)))
+		SSP_CONFIG_DATA(SSP, 2, 16, 1, 0, 0, SSP_CC_BCLK_ES)))
 ', HEADPHONE, `cs42l42', `
 #SSP 2 (ID: 1) with 19.2 MHz mclk with MCLK_ID 1 (unused), 2.4 MHz bclk, no quirk, 10 ms BCLK delay
 DAI_CONFIG(SSP, 2, 1, SSP2-Codec,

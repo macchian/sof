@@ -173,7 +173,7 @@ DAI_CONFIG(SSP, 0, 1, SSP0-Codec,
 		SSP_CLOCK(bclk, 2400000, codec_slave),
 		SSP_CLOCK(fsync, 48000, codec_slave),
 		SSP_TDM(2, 25, 3, 3),
-		SSP_CONFIG_DATA(SSP, 0, 16)))
+		SSP_CONFIG_DATA(SSP, 0, 16, 0, 0, 0, SSP_CC_BCLK_ES)))
 
 # 3 HDMI/DP outputs (ID: 3,4,5)
 DAI_CONFIG(HDA, 0, 3, iDisp1,

@@ -241,7 +241,7 @@ DAI_CONFIG(SSP, SSP_INDEX, 1, SSP_NAME,
                 SSP_CLOCK(bclk, SSP_BCLK, codec_slave),
                 SSP_CLOCK(fsync, SSP_FSYNC, codec_slave),
                 SSP_TDM(2, SSP_BITS_WIDTH, 3, 3),
-                SSP_CONFIG_DATA(SSP, SSP_INDEX, SSP_VALID_BITS, MCLK_ID)))
+                SSP_CONFIG_DATA(SSP, SSP_INDEX, SSP_VALID_BITS, MCLK_ID, 0, 0, SSP_CC_BCLK_ES)))
 
 # dmic01 (ID: 2)
 DAI_CONFIG(DMIC, 0, 2, dmic01,
