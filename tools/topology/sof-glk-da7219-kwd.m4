@@ -196,7 +196,7 @@ DAI_CONFIG(SSP, 2, 1, SSP2-Codec,
 		SSP_CLOCK(bclk, 1920000, codec_slave),
 		SSP_CLOCK(fsync, 48000, codec_slave),
 		SSP_TDM(2, 20, 3, 3),
-		SSP_CONFIG_DATA(SSP, 2, 16, 1)))
+		SSP_CONFIG_DATA(SSP, 2, 16, 1, 0, SSP_CC_BCLK_ES)))
 
 # dmic01 (ID: 2)
 DAI_CONFIG(DMIC, 0, 2, dmic01,
