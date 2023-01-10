@@ -13,7 +13,7 @@ config TRACE
 config TRACEV
 	bool "Trace verbose"
 	depends on TRACE
-	default n
+	default y
 	help
 	  Enabling verbose traces. tr_dbg() statements depend on this at
 	  compile-time and on run-time filtering below too.
@@ -28,7 +28,7 @@ config TRACEE
 config TRACEM
 	bool "Trace mailbox"
 	depends on TRACE
-	default n
+	default y
 	help
 	  Sending all traces by mailbox additionally.
 
