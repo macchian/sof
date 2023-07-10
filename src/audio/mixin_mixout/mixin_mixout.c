@@ -120,9 +120,10 @@ static int mixin_init(struct processing_module *mod)
 				    &frame_fmt, &valid_fmt,
 				    mod->priv.cfg.base_cfg.audio_fmt.s_type);
 
-	dev->ipc_config.frame_fmt = frame_fmt;
+	dev->ipc_config.frame_fmt = valid_fmt;
 	mod->skip_src_buffer_invalidate = true;
 
+	mod->max_sinks = MIXIN_MAX_SINKS;
 	return 0;
 }
 
@@ -148,9 +149,10 @@ static int mixout_init(struct processing_module *mod)
 				    &frame_fmt, &valid_fmt,
 				    mod->priv.cfg.base_cfg.audio_fmt.s_type);
 
-	dev->ipc_config.frame_fmt = frame_fmt;
+	dev->ipc_config.frame_fmt = valid_fmt;
 	mod->skip_sink_buffer_writeback = true;
 
+	mod->max_sources = MIXOUT_MAX_SOURCES;
 	return 0;
 }
 
@@ -748,7 +750,7 @@ static void base_module_cfg_to_stream_params(const struct ipc4_base_module_cfg *
 				    base_cfg->audio_fmt.valid_bit_depth,
 				    &frame_fmt, &valid_fmt,
 				    base_cfg->audio_fmt.s_type);
-	params->frame_fmt = frame_fmt;
+	params->frame_fmt = valid_fmt;
 
 	for (i = 0; i < SOF_IPC_MAX_CHANNELS; i++)
 		params->chmap[i] = (base_cfg->audio_fmt.ch_map >> i * 4) & 0xf;

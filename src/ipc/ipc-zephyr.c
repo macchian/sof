@@ -17,11 +17,15 @@
 #include <sof/ipc/schedule.h>
 #include <sof/lib/mailbox.h>
 #include <sof/lib/memory.h>
-#if defined(CONFIG_PM_POLICY_CUSTOM)
+#if defined(CONFIG_PM)
 #include <sof/lib/cpu.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/state.h>
+#include <zephyr/irq.h>
+#include <zephyr/pm/policy.h>
 #else
 #include <sof/lib/pm_runtime.h>
-#endif
+#endif /* CONFIG_PM */
 #include <sof/lib/uuid.h>
 #include <rtos/wait.h>
 #include <sof/list.h>
@@ -39,6 +43,8 @@
 /* 8fa1d42f-bc6f-464b-867f-547af08834da */
 DECLARE_SOF_UUID("ipc-task", ipc_task_uuid, 0x8fa1d42f, 0xbc6f, 0x464b,
 		 0x86, 0x7f, 0x54, 0x7a, 0xf0, 0x88, 0x34, 0xda);
+
+LOG_MODULE_DECLARE(ipc, CONFIG_SOF_LOG_LEVEL);
 
 /**
  * @brief Private data for IPC.
@@ -78,6 +84,69 @@ static bool message_handler(const struct device *dev, void *arg, uint32_t data, 
 
 	return false;
 }
+
+#ifdef CONFIG_PM_DEVICE
+/**
+ * @brief IPC device suspend handler callback function.
+ * Checks whether device power state should be actually changed.
+ *
+ * @param dev IPC device.
+ * @param arg IPC struct pointer.
+ */
+static int ipc_device_suspend_handler(const struct device *dev, void *arg)
+{
+	struct ipc *ipc = (struct ipc *)arg;
+
+	int ret = 0;
+
+	if (!(ipc->task_mask & IPC_TASK_POWERDOWN)) {
+		tr_err(&ipc_tr,
+		       "ipc task mask not set to IPC_TASK_POWERDOWN. Current value: %u",
+		       ipc->task_mask);
+		ret = -ENOMSG;
+	}
+
+	if (!ipc->pm_prepare_D3) {
+		tr_err(&ipc_tr, "power state D3 not requested");
+		ret = -EBADMSG;
+	}
+
+	if (!list_is_empty(&ipc->msg_list)) {
+		tr_err(&ipc_tr, "there are queued IPC messages to be sent");
+		ret = -EINPROGRESS;
+	}
+
+	if (ret != 0)
+		ipc_send_failed_power_transition_response();
+
+	return ret;
+}
+
+/**
+ * @brief IPC device resume handler callback function.
+ * Resets IPC control after context restore.
+ *
+ * @param dev IPC device.
+ * @param arg IPC struct pointer.
+ */
+static int ipc_device_resume_handler(const struct device *dev, void *arg)
+{
+	struct ipc *ipc = (struct ipc *)arg;
+
+	ipc_set_drvdata(ipc, NULL);
+	ipc->task_mask = 0;
+	ipc->pm_prepare_D3 = false;
+
+	/* attach handlers */
+	intel_adsp_ipc_set_message_handler(INTEL_ADSP_IPC_HOST_DEV, message_handler, ipc);
+
+	/* schedule task */
+	schedule_task_init_edf(&ipc->ipc_task, SOF_UUID(ipc_task_uuid),
+			       &ipc_task_ops, ipc, 0, 0);
+
+	return 0;
+}
+#endif /* CONFIG_PM_DEVICE */
 
 #if CONFIG_DEBUG_IPC_COUNTERS
 
@@ -130,7 +199,7 @@ enum task_state ipc_platform_do_cmd(struct ipc *ipc)
 
 	if (ipc->task_mask & IPC_TASK_POWERDOWN ||
 	    ipc_get()->pm_prepare_D3) {
-#if defined(CONFIG_PM_POLICY_CUSTOM)
+#if defined(CONFIG_PM)
 		/**
 		 * @note For primary core this function
 		 * will only force set lower power state
@@ -145,7 +214,7 @@ enum task_state ipc_platform_do_cmd(struct ipc *ipc)
 		 * powered off and IPC sent.
 		 */
 		platform_pm_runtime_power_off();
-#endif /* CONFIG_PM_POLICY_CUSTOM  */
+#endif /* CONFIG_PM  */
 	}
 
 	return SOF_TASK_STATE_COMPLETED;
@@ -197,6 +266,12 @@ int platform_ipc_init(struct ipc *ipc)
 
 	/* attach handlers */
 	intel_adsp_ipc_set_message_handler(INTEL_ADSP_IPC_HOST_DEV, message_handler, ipc);
+#ifdef CONFIG_PM
+	intel_adsp_ipc_set_suspend_handler(INTEL_ADSP_IPC_HOST_DEV,
+					   ipc_device_suspend_handler, ipc);
+	intel_adsp_ipc_set_resume_handler(INTEL_ADSP_IPC_HOST_DEV,
+					  ipc_device_resume_handler, ipc);
+#endif
 
 	return 0;
 }

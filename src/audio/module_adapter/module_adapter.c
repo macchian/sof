@@ -18,6 +18,7 @@
 #include <sof/common.h>
 #include <sof/platform.h>
 #include <sof/ut.h>
+#include <rtos/interrupt.h>
 #include <limits.h>
 #include <stdint.h>
 
@@ -143,6 +144,10 @@ struct comp_dev *module_adapter_new(const struct comp_driver *drv,
 		dst->init_data = spec;
 	}
 #endif
+
+	/* Modules must modify them if they support more than 1 source/sink */
+	mod->max_sources = 1;
+	mod->max_sinks = 1;
 
 	/* Init processing module */
 	ret = module_init(mod, interface);
@@ -308,17 +313,29 @@ int module_adapter_prepare(struct comp_dev *dev)
 	}
 
 	/* check processing mode */
-	if (IS_PROCESSING_MODE_AUDIO_STREAM(mod) &&
-	    mod->num_input_buffers > 1 && mod->num_output_buffers > 1) {
+	if (IS_PROCESSING_MODE_AUDIO_STREAM(mod) && mod->max_sources > 1 && mod->max_sinks > 1) {
 		comp_err(dev, "module_adapter_prepare(): Invalid use of simple_copy");
 		return -EINVAL;
 	}
 
+#if CONFIG_IPC_MAJOR_3
+	/* Check if audio stream client has only one source and one sink buffer to use a
+	 * simplified copy function.
+	 */
+	if (IS_PROCESSING_MODE_AUDIO_STREAM(mod) && mod->num_input_buffers == 1 &&
+	    mod->num_output_buffers == 1) {
+		mod->source_comp_buffer = list_first_item(&dev->bsource_list,
+							  struct comp_buffer, sink_list);
+		mod->sink_comp_buffer = sink;
+		mod->stream_copy_single_to_single = true;
+	}
+#endif
+
 	/* allocate memory for input buffers */
-	if (mod->num_input_buffers) {
+	if (mod->max_sources) {
 		mod->input_buffers =
 			rzalloc(SOF_MEM_ZONE_RUNTIME, 0, SOF_MEM_CAPS_RAM,
-				sizeof(*mod->input_buffers) * mod->num_input_buffers);
+				sizeof(*mod->input_buffers) * mod->max_sources);
 		if (!mod->input_buffers) {
 			comp_err(dev, "module_adapter_prepare(): failed to allocate input buffers");
 			return -ENOMEM;
@@ -328,10 +345,10 @@ int module_adapter_prepare(struct comp_dev *dev)
 	}
 
 	/* allocate memory for output buffers */
-	if (mod->num_output_buffers) {
+	if (mod->max_sinks) {
 		mod->output_buffers =
 			rzalloc(SOF_MEM_ZONE_RUNTIME, 0, SOF_MEM_CAPS_RAM,
-				sizeof(*mod->output_buffers) * mod->num_output_buffers);
+				sizeof(*mod->output_buffers) * mod->max_sinks);
 		if (!mod->output_buffers) {
 			comp_err(dev, "module_adapter_prepare(): failed to allocate output buffers");
 			ret = -ENOMEM;
@@ -426,13 +443,17 @@ int module_adapter_prepare(struct comp_dev *dev)
 		for (i = 0; i < mod->num_output_buffers; i++) {
 			struct comp_buffer *buffer = buffer_alloc(buff_size, SOF_MEM_CAPS_RAM,
 								  0, PLATFORM_DCACHE_ALIGN);
+			uint32_t flags;
+
 			if (!buffer) {
 				comp_err(dev, "module_adapter_prepare(): failed to allocate local buffer");
 				ret = -ENOMEM;
 				goto free;
 			}
 
+			irq_local_disable(flags);
 			buffer_attach(buffer, &mod->sink_buffer_list, PPL_DIR_UPSTREAM);
+			irq_local_enable(flags);
 
 			buffer_c = buffer_acquire(buffer);
 			buffer_set_params(buffer_c, mod->stream_params, BUFFER_UPDATE_FORCE);
@@ -467,8 +488,11 @@ free:
 	list_for_item_safe(blist, _blist, &mod->sink_buffer_list) {
 		struct comp_buffer *buffer = container_of(blist, struct comp_buffer,
 							  sink_list);
+		uint32_t flags;
 
+		irq_local_disable(flags);
 		buffer_detach(buffer, &mod->sink_buffer_list, PPL_DIR_UPSTREAM);
+		irq_local_enable(flags);
 		buffer_free(buffer);
 	}
 
@@ -785,15 +809,66 @@ module_single_source_setup(struct comp_dev *dev,
 	return num_output_buffers;
 }
 
+static int module_adapter_audio_stream_copy_1to1(struct comp_dev *dev)
+{
+	struct processing_module *mod = comp_get_drvdata(dev);
+	struct comp_buffer __sparse_cache *source_c;
+	struct comp_buffer __sparse_cache *sink_c;
+	uint32_t num_output_buffers = 0;
+	uint32_t frames;
+	int ret;
+
+	source_c = buffer_acquire(mod->source_comp_buffer);
+	sink_c = buffer_acquire(mod->sink_comp_buffer);
+	frames = audio_stream_avail_frames_aligned(&source_c->stream, &sink_c->stream);
+	mod->input_buffers[0].size = frames;
+	mod->input_buffers[0].consumed = 0;
+	mod->input_buffers[0].data = &source_c->stream;
+	mod->output_buffers[0].size = 0;
+	mod->output_buffers[0].data = &sink_c->stream;
+	if (!mod->skip_src_buffer_invalidate) /* TODO: add mod->is_multi_core && optimization */
+		buffer_stream_invalidate(source_c,
+					 frames * audio_stream_frame_bytes(&source_c->stream));
+
+	/* Note: Source buffer state is not checked to enable mixout to generate zero
+	 * PCM codes when source is not active.
+	 */
+	if (sink_c->sink->state == dev->state)
+		num_output_buffers = 1;
+
+	ret = module_process_legacy(mod, mod->input_buffers, 1,
+				    mod->output_buffers, num_output_buffers);
+
+	/* consume from the input buffer */
+	mod->total_data_consumed += mod->input_buffers[0].consumed;
+	if (mod->input_buffers[0].consumed)
+		audio_stream_consume(&source_c->stream, mod->input_buffers[0].consumed);
+
+	/* produce data into the output buffer */
+	mod->total_data_produced += mod->output_buffers[0].size;
+	if (!mod->skip_sink_buffer_writeback) /* TODO: add mod->is_multi_core && optimization */
+		buffer_stream_writeback(sink_c, mod->output_buffers[0].size);
+
+	if (mod->output_buffers[0].size)
+		audio_stream_produce(&sink_c->stream, mod->output_buffers[0].size);
+
+	/* release all buffers */
+	buffer_release(sink_c);
+	buffer_release(source_c);
+	return ret;
+}
+
 static int module_adapter_audio_stream_type_copy(struct comp_dev *dev)
 {
 	struct comp_buffer __sparse_cache *source_c[PLATFORM_MAX_STREAMS];
 	struct comp_buffer __sparse_cache *sinks_c[PLATFORM_MAX_STREAMS];
 	struct processing_module *mod = comp_get_drvdata(dev);
 	struct list_item *blist;
-	uint32_t num_input_buffers = 0;
-	uint32_t num_output_buffers = 0;
+	uint32_t num_input_buffers, num_output_buffers;
 	int ret, i = 0;
+
+	if (mod->stream_copy_single_to_single)
+		return module_adapter_audio_stream_copy_1to1(dev);
 
 	/* acquire all sink and source buffers */
 	list_for_item(blist, &dev->bsink_list) {
@@ -802,6 +877,12 @@ static int module_adapter_audio_stream_type_copy(struct comp_dev *dev)
 		sink = container_of(blist, struct comp_buffer, source_list);
 		sinks_c[i++] = buffer_acquire(sink);
 	}
+	num_output_buffers = i;
+	if (num_output_buffers > mod->max_sinks) {
+		comp_err(dev, "Invalid number of sinks %d\n", num_output_buffers);
+		return -EINVAL;
+	}
+
 	i = 0;
 	list_for_item(blist, &dev->bsource_list) {
 		struct comp_buffer *source;
@@ -809,16 +890,28 @@ static int module_adapter_audio_stream_type_copy(struct comp_dev *dev)
 		source = container_of(blist, struct comp_buffer, sink_list);
 		source_c[i++] = buffer_acquire(source);
 	}
+	num_input_buffers = i;
+	if (num_input_buffers > mod->max_sources) {
+		comp_err(dev, "Invalid number of sinks %d\n", num_input_buffers);
+		return -EINVAL;
+	}
 
 	/* setup active input/output buffers for processing */
-	if (mod->num_output_buffers == 1) {
-		num_input_buffers = module_single_sink_setup(dev, source_c, sinks_c);
-		if (sinks_c[0]->sink->state == dev->state)
-			num_output_buffers = 1;
+	if (num_output_buffers == 1) {
+		module_single_sink_setup(dev, source_c, sinks_c);
+		if (sinks_c[0]->sink->state != dev->state) {
+			num_output_buffers = 0;
+			buffer_release(sinks_c[0]);
+		}
+	} else if (num_input_buffers == 1) {
+		module_single_source_setup(dev, source_c, sinks_c);
+		if (source_c[0]->source->state != dev->state) {
+			num_input_buffers = 0;
+			buffer_release(source_c[0]);
+		}
 	} else {
-		num_output_buffers = module_single_source_setup(dev, source_c, sinks_c);
-		if (source_c[0]->source->state == dev->state)
-			num_input_buffers = 1;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	ret = module_process_legacy(mod, mod->input_buffers, num_input_buffers,
@@ -851,12 +944,10 @@ static int module_adapter_audio_stream_type_copy(struct comp_dev *dev)
 	mod->total_data_consumed += mod->input_buffers[0].consumed;
 
 	/* release all source buffers */
-	i = 0;
-	list_for_item(blist, &dev->bsource_list) {
+	for (i = 0; i < num_input_buffers; i++) {
 		buffer_release(source_c[i]);
 		mod->input_buffers[i].size = 0;
 		mod->input_buffers[i].consumed = 0;
-		i++;
 	}
 
 	/* produce data into all active output buffers */
@@ -876,25 +967,20 @@ static int module_adapter_audio_stream_type_copy(struct comp_dev *dev)
 	mod->total_data_produced += mod->output_buffers[0].size;
 
 	/* release all sink buffers */
-	i = 0;
-	list_for_item(blist, &dev->bsink_list) {
+	for (i = 0; i < num_output_buffers; i++) {
 		buffer_release(sinks_c[i]);
-		mod->output_buffers[i++].size = 0;
+		mod->output_buffers[i].size = 0;
 	}
 
 	return 0;
 out:
-	i = 0;
-	list_for_item(blist, &dev->bsink_list)
-		buffer_release(sinks_c[i++]);
-	i = 0;
-	list_for_item(blist, &dev->bsource_list)
-		buffer_release(source_c[i++]);
-
-	for (i = 0; i < mod->num_output_buffers; i++)
+	for (i = 0; i < num_output_buffers; i++) {
+		buffer_release(sinks_c[i]);
 		mod->output_buffers[i].size = 0;
+	}
 
-	for (i = 0; i < mod->num_input_buffers; i++) {
+	for (i = 0; i < num_input_buffers; i++) {
+		buffer_release(source_c[i]);
 		mod->input_buffers[i].size = 0;
 		mod->input_buffers[i].consumed = 0;
 	}
@@ -1339,8 +1425,11 @@ void module_adapter_free(struct comp_dev *dev)
 	list_for_item_safe(blist, _blist, &mod->sink_buffer_list) {
 		struct comp_buffer *buffer = container_of(blist, struct comp_buffer,
 							  sink_list);
+		uint32_t flags;
 
+		irq_local_disable(flags);
 		buffer_detach(buffer, &mod->sink_buffer_list, PPL_DIR_UPSTREAM);
+		irq_local_enable(flags);
 		buffer_free(buffer);
 	}
 
@@ -1429,6 +1518,32 @@ int module_adapter_get_attribute(struct comp_dev *dev, uint32_t type, void *valu
 	return 0;
 }
 
+static bool module_adapter_multi_sink_source_check(struct comp_dev *dev)
+{
+	struct processing_module *mod = comp_get_drvdata(dev);
+	struct list_item *blist;
+	int num_sources = 0;
+	int num_sinks = 0;
+
+	list_for_item(blist, &dev->bsource_list)
+		num_sources++;
+
+	list_for_item(blist, &dev->bsink_list)
+		num_sinks++;
+
+	comp_dbg(dev, "num_sources=%d num_sinks=%d", num_sources, num_sinks);
+
+	if (num_sources != 1 || num_sinks != 1)
+		return true;
+
+	/* re-assign the source/sink modules */
+	mod->sink_comp_buffer = list_first_item(&dev->bsink_list, struct comp_buffer, source_list);
+	mod->source_comp_buffer = list_first_item(&dev->bsource_list,
+						  struct comp_buffer, sink_list);
+
+	return false;
+}
+
 int module_adapter_bind(struct comp_dev *dev, void *data)
 {
 	struct module_source_info __sparse_cache *mod_source_info;
@@ -1440,6 +1555,8 @@ int module_adapter_bind(struct comp_dev *dev, void *data)
 
 	bu = (struct ipc4_module_bind_unbind *)data;
 	src_id = IPC4_COMP_ID(bu->primary.r.module_id, bu->primary.r.instance_id);
+
+	mod->stream_copy_single_to_single = !module_adapter_multi_sink_source_check(dev);
 
 	/* nothing to do if this module is the source during bind */
 	if (dev->ipc_config.id == src_id)
@@ -1489,6 +1606,8 @@ int module_adapter_unbind(struct comp_dev *dev, void *data)
 
 	bu = (struct ipc4_module_bind_unbind *)data;
 	src_id = IPC4_COMP_ID(bu->primary.r.module_id, bu->primary.r.instance_id);
+
+	mod->stream_copy_single_to_single = !module_adapter_multi_sink_source_check(dev);
 
 	/* nothing to do if this module is the source during unbind */
 	if (dev->ipc_config.id == src_id)
