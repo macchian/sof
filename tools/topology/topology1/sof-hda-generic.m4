@@ -102,7 +102,8 @@ ifdef(`HSSFX_FILTER2', `define(PIPELINE_FILTER2, HSSFX_FILTER2)', `undefine(`PIP
 
 # Low Latency playback pipeline 1 on PCM 30 using max 2 channels of s32le.
 # 1000us deadline on core 0 with priority 0
-PIPELINE_PCM_ADD(sof/pipe-host-HSSFX-playback.m4,
+PIPELINE_PCM_ADD(
+ifdef(`DTS', sof/pipe-eq-iir-dts-codec-playback.m4, sof/pipe-host-HSSFX-playback.m4),
 	30, 0, 2, s32le,
 	1000, 0, 0,
 	48000, 48000, 48000,
