@@ -30,7 +30,6 @@ static int pipeline_comp_params_neg(struct comp_dev *current,
 				    int dir)
 {
 	struct pipeline_data *ppl_data = ctx->comp_data;
-	struct comp_buffer __sparse_cache *buf_c = buffer_acquire(calling_buf);
 	int err = 0;
 
 	pipe_dbg(current->pipeline, "pipeline_comp_params_neg(), current->comp.id = %u, dir = %u",
@@ -48,12 +47,12 @@ static int pipeline_comp_params_neg(struct comp_dev *current,
 		 * a component who has different channels input/output buffers
 		 * should explicitly configure the channels of the branched buffers.
 		 */
-		err = buffer_set_params(buf_c, &ppl_data->params->params,
+		err = buffer_set_params(calling_buf, &ppl_data->params->params,
 					BUFFER_UPDATE_FORCE);
 		break;
 	default:
 		/* return 0 if params matches */
-		if (!buffer_params_match(buf_c,
+		if (!buffer_params_match(calling_buf,
 					 &ppl_data->params->params,
 					 BUFF_PARAMS_FRAME_FMT |
 					 BUFF_PARAMS_RATE)) {
@@ -66,8 +65,6 @@ static int pipeline_comp_params_neg(struct comp_dev *current,
 			err = -EINVAL;
 		}
 	}
-
-	buffer_release(buf_c);
 	return err;
 }
 
@@ -131,7 +128,7 @@ static int pipeline_comp_params(struct comp_dev *current,
 }
 
 /* save params changes made by component */
-static void pipeline_update_buffer_pcm_params(struct comp_buffer __sparse_cache *buffer,
+static void pipeline_update_buffer_pcm_params(struct comp_buffer *buffer,
 					      void *data)
 {
 	struct sof_ipc_stream_params *params = data;
@@ -188,11 +185,8 @@ static int pipeline_comp_hw_params_buf(struct comp_dev *current,
 		return ret;
 	/* set buffer parameters */
 	if (calling_buf) {
-		struct comp_buffer __sparse_cache *buf_c = buffer_acquire(calling_buf);
-
-		ret = buffer_set_params(buf_c, &ppl_data->params->params,
+		ret = buffer_set_params(calling_buf, &ppl_data->params->params,
 					BUFFER_UPDATE_IF_UNSET);
-		buffer_release(buf_c);
 		if (ret < 0)
 			pipe_err(current->pipeline,
 				 "pipeline_comp_hw_params(): buffer_set_params(): %d", ret);
@@ -317,35 +311,12 @@ static int pipeline_comp_prepare(struct comp_dev *current,
 		}
 	}
 
-	switch (current->ipc_config.proc_domain) {
-	case COMP_PROCESSING_DOMAIN_LL:
-		/* this is a LL scheduled module */
+	if (current->ipc_config.proc_domain == COMP_PROCESSING_DOMAIN_LL) {
+		/* init a task for LL module, DP task has been created in during init_instance */
 		err = pipeline_comp_ll_task_init(current->pipeline);
-		break;
-
-#if CONFIG_ZEPHYR_DP_SCHEDULER
-	case COMP_PROCESSING_DOMAIN_DP:
-		/* this is a DP scheduled module */
-
-		/*
-		 * workaround - because of some issues with cache, currently we can allow DP
-		 * modules to run on the same core as LL pipeline only.
-		 * to be removed once buffering is fixed
-		 */
-		if (current->pipeline->core != current->ipc_config.core)
-			err = -EINVAL;
-		else
-			err = pipeline_comp_dp_task_init(current);
-
-		break;
-#endif /* CONFIG_ZEPHYR_DP_SCHEDULER */
-
-	default:
-		err = -EINVAL;
+		if (err < 0)
+			return err;
 	}
-
-	if (err < 0)
-		return err;
 
 	err = comp_prepare(current);
 	if (err < 0 || err == PPL_STATUS_PATH_STOP)

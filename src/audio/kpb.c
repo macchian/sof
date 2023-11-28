@@ -38,6 +38,7 @@
 #include <rtos/string.h>
 #include <sof/ut.h>
 #include <ipc/topology.h>
+#include <ipc4/module.h>
 #include <ipc4/kpb.h>
 #include <user/kpb.h>
 #include <user/trace.h>
@@ -106,6 +107,8 @@ struct comp_data {
 	uint32_t num_of_in_channels;
 	uint32_t offsets[KPB_MAX_MICSEL_CHANNELS];
 	struct kpb_micselector_config mic_sel;
+	struct kpb_fmt_dev_list fmt_device_list;
+	struct fast_mode_task fmt;
 
 #if CONFIG_AMS
 	uint32_t kpd_uuid_id;
@@ -120,18 +123,18 @@ static int kpb_register_client(struct comp_data *kpb, struct kpb_client *cli);
 static void kpb_init_draining(struct comp_dev *dev, struct kpb_client *cli);
 static enum task_state kpb_draining_task(void *arg);
 static int kpb_buffer_data(struct comp_dev *dev,
-			   const struct comp_buffer __sparse_cache *source, size_t size);
+			   const struct comp_buffer *source, size_t size);
 static size_t kpb_allocate_history_buffer(struct comp_data *kpb,
 					  size_t hb_size_req);
 static void kpb_clear_history_buffer(struct history_buffer *buff);
 static void kpb_free_history_buffer(struct history_buffer *buff);
 static inline bool kpb_is_sample_width_supported(uint32_t sampling_width);
-static void kpb_copy_samples(struct comp_buffer __sparse_cache *sink,
-			     struct comp_buffer __sparse_cache *source, size_t size,
+static void kpb_copy_samples(struct comp_buffer *sink,
+			     struct comp_buffer *source, size_t size,
 			     size_t sample_width, uint32_t channels);
-static void kpb_drain_samples(void *source, struct audio_stream __sparse_cache *sink,
+static void kpb_drain_samples(void *source, struct audio_stream *sink,
 			      size_t size, size_t sample_width);
-static void kpb_buffer_samples(const struct audio_stream __sparse_cache *source,
+static void kpb_buffer_samples(const struct audio_stream *source,
 			       int offset, void *sink, size_t size,
 			       size_t sample_width);
 static void kpb_reset_history_buffer(struct history_buffer *buff);
@@ -141,6 +144,23 @@ static inline bool validate_host_params(struct comp_dev *dev,
 					size_t hb_size_req);
 static inline void kpb_change_state(struct comp_data *kpb,
 				    enum kpb_state state);
+#ifdef CONFIG_IPC_MAJOR_4
+/* KpbFastModeTaskModulesList Namespace */
+static inline int alloc_fmt_module_list_item(struct kpb_fmt_dev_list *fmt_device_list,
+					     struct comp_dev *mi_ptr, struct comp_dev ***item);
+static int clear_fmt_modules_list(struct kpb_fmt_dev_list *fmt_device_list,
+				  uint32_t outpin_idx);
+static int prepare_fmt_modules_list(struct comp_dev *kpb_dev, uint32_t outpin_idx,
+				    const struct kpb_task_params *modules_to_prepare);
+/* FMT Namespace */
+static int register_modules_list(struct fast_mode_task *fmt,
+				 struct device_list *new_list, size_t list_idx);
+static int unregister_modules_list(struct fast_mode_task *fmt,
+				   struct device_list *list_to_remove, size_t list_idx);
+/* Devicelist */
+static int devicelist_push(struct device_list *devlist, struct comp_dev **dev);
+static void devicelist_reset(struct device_list *devlist, bool remove_items);
+#endif
 
 static uint64_t kpb_task_deadline(void *data)
 {
@@ -330,17 +350,14 @@ static int kpb_bind(struct comp_dev *dev, void *data)
 
 	list_for_item(blist, &dev->bsink_list) {
 		struct comp_buffer *sink = container_of(blist, struct comp_buffer, source_list);
-		struct comp_buffer __sparse_cache *sink_c = buffer_acquire(sink);
 		int sink_buf_id;
 
-		if (!sink_c->sink) {
+		if (!sink->sink) {
 			ret = -EINVAL;
-			buffer_release(sink_c);
 			break;
 		}
 
-		sink_buf_id = sink_c->id;
-		buffer_release(sink_c);
+		sink_buf_id = sink->id;
 
 		if (sink_buf_id == buf_id) {
 			if (sink_buf_id == 0)
@@ -376,7 +393,8 @@ static int kpb_unbind(struct comp_dev *dev, void *data)
 	else
 		kpb->host_sink = NULL;
 
-	return 0;
+	/* Clear fmt config */
+	return clear_fmt_modules_list(&kpb->fmt_device_list, bu->extension.r.src_queue);
 }
 
 #else /* CONFIG_IPC_MAJOR_4 */
@@ -848,17 +866,13 @@ static int kpb_prepare(struct comp_dev *dev)
 
 	list_for_item(blist, &dev->bsink_list) {
 		struct comp_buffer *sink = container_of(blist, struct comp_buffer, source_list);
-		struct comp_buffer __sparse_cache *sink_c = buffer_acquire(sink);
 		enum sof_comp_type type;
 
-		if (!sink_c->sink) {
+		if (!sink->sink) {
 			ret = -EINVAL;
-			buffer_release(sink_c);
 			break;
 		}
-
-		type = dev_comp_type(sink_c->sink);
-		buffer_release(sink_c);
+		type = dev_comp_type(sink->sink);
 
 		switch (type) {
 		case SOF_COMP_SELECTOR:
@@ -886,18 +900,15 @@ static int kpb_prepare(struct comp_dev *dev)
 		list_for_item(sink_list, &dev->bsink_list) {
 			struct comp_buffer *sink =
 				container_of(sink_list, struct comp_buffer, source_list);
-			struct comp_buffer __sparse_cache *sink_c = buffer_acquire(sink);
 
 			audio_stream_init_alignment_constants(byte_align, frame_align_req,
-							      &sink_c->stream);
-			sink_id = sink_c->id;
+							      &sink->stream);
+			sink_id = sink->id;
 
 			if (sink_id == 0)
-				audio_stream_set_channels(&sink_c->stream, kpb->num_of_sel_mic);
+				audio_stream_set_channels(&sink->stream, kpb->num_of_sel_mic);
 			else
-				audio_stream_set_channels(&sink_c->stream, kpb->config.channels);
-
-			buffer_release(sink_c);
+				audio_stream_set_channels(&sink->stream, kpb->config.channels);
 		}
 	}
 #endif /* CONFIG_IPC_MAJOR_4 */
@@ -991,12 +1002,12 @@ static int kpb_reset(struct comp_dev *dev)
 
 #ifdef KPB_HIFI3
 #if CONFIG_FORMAT_S16LE
-static void kpb_micselect_copy16(struct comp_buffer __sparse_cache *sink,
-				 struct comp_buffer __sparse_cache *source, size_t size,
+static void kpb_micselect_copy16(struct comp_buffer *sink,
+				 struct comp_buffer *source, size_t size,
 				 uint32_t in_channels, uint32_t micsel_channels, uint32_t *offsets)
 {
-	struct audio_stream __sparse_cache *istream = &source->stream;
-	struct audio_stream __sparse_cache *ostream = &sink->stream;
+	struct audio_stream *istream = &source->stream;
+	struct audio_stream *ostream = &sink->stream;
 	uint16_t ch;
 	size_t i;
 
@@ -1024,12 +1035,12 @@ static void kpb_micselect_copy16(struct comp_buffer __sparse_cache *sink,
 }
 #endif
 #if CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE
-static void kpb_micselect_copy32(struct comp_buffer __sparse_cache *sink,
-				 struct comp_buffer __sparse_cache *source, size_t size,
+static void kpb_micselect_copy32(struct comp_buffer *sink,
+				 struct comp_buffer *source, size_t size,
 				 uint32_t in_channels, uint32_t micsel_channels, uint32_t *offsets)
 {
-	struct audio_stream __sparse_cache *istream = &source->stream;
-	struct audio_stream __sparse_cache *ostream = &sink->stream;
+	struct audio_stream *istream = &source->stream;
+	struct audio_stream *ostream = &sink->stream;
 	uint16_t ch;
 	size_t i;
 
@@ -1058,12 +1069,12 @@ static void kpb_micselect_copy32(struct comp_buffer __sparse_cache *sink,
 }
 #endif
 #else
-static void kpb_micselect_copy16(struct comp_buffer __sparse_cache *sink,
-				 struct comp_buffer __sparse_cache *source, size_t size,
+static void kpb_micselect_copy16(struct comp_buffer *sink,
+				 struct comp_buffer *source, size_t size,
 				 uint32_t in_channels,  uint32_t micsel_channels, uint32_t *offsets)
 {
-	struct audio_stream __sparse_cache *istream = &source->stream;
-	struct audio_stream __sparse_cache *ostream = &sink->stream;
+	struct audio_stream *istream = &source->stream;
+	struct audio_stream *ostream = &sink->stream;
 
 	buffer_stream_invalidate(source, size);
 	size_t out_samples;
@@ -1090,12 +1101,12 @@ static void kpb_micselect_copy16(struct comp_buffer __sparse_cache *sink,
 	}
 }
 
-static void kpb_micselect_copy32(struct comp_buffer __sparse_cache *sink,
-				 struct comp_buffer __sparse_cache *source, size_t size,
+static void kpb_micselect_copy32(struct comp_buffer *sink,
+				 struct comp_buffer *source, size_t size,
 				 uint32_t in_channels, uint32_t micsel_channels, uint32_t *offsets)
 {
-	struct audio_stream __sparse_cache *istream = &source->stream;
-	struct audio_stream __sparse_cache *ostream = &sink->stream;
+	struct audio_stream *istream = &source->stream;
+	struct audio_stream *ostream = &sink->stream;
 
 	buffer_stream_invalidate(source, size);
 	size_t out_samples;
@@ -1121,8 +1132,8 @@ static void kpb_micselect_copy32(struct comp_buffer __sparse_cache *sink,
 	}
 }
 #endif
-static void kpb_micselect_copy(struct comp_dev *dev, struct comp_buffer __sparse_cache *sink_c,
-			       struct comp_buffer __sparse_cache *source_c, size_t copy_bytes,
+static void kpb_micselect_copy(struct comp_dev *dev, struct comp_buffer *sink_c,
+			       struct comp_buffer *source_c, size_t copy_bytes,
 			       uint32_t channels)
 {
 	struct comp_data *kpb = comp_get_drvdata(dev);
@@ -1167,7 +1178,6 @@ static int kpb_copy(struct comp_dev *dev)
 	int ret = 0;
 	struct comp_data *kpb = comp_get_drvdata(dev);
 	struct comp_buffer *source, *sink;
-	struct comp_buffer __sparse_cache *source_c, *sink_c = NULL;
 	size_t copy_bytes = 0, produced_bytes = 0;
 	size_t sample_width = kpb->config.sampling_width;
 	struct draining_data *dd = &kpb->draining_task_data;
@@ -1185,13 +1195,11 @@ static int kpb_copy(struct comp_dev *dev)
 	source = list_first_item(&dev->bsource_list, struct comp_buffer,
 				 sink_list);
 
-	source_c = buffer_acquire(source);
-
 	/* Validate source */
-	if (!audio_stream_get_rptr(&source_c->stream)) {
+	if (!audio_stream_get_rptr(&source->stream)) {
 		comp_err(dev, "kpb_copy(): invalid source pointers.");
 		ret = -EINVAL;
-		goto out;
+		return ret;
 	}
 
 	switch (kpb->state) {
@@ -1206,29 +1214,27 @@ static int kpb_copy(struct comp_dev *dev)
 			break;
 		}
 
-		sink_c = buffer_acquire(sink);
-
 		/* Validate sink */
-		if (!audio_stream_get_wptr(&sink_c->stream)) {
+		if (!audio_stream_get_wptr(&sink->stream)) {
 			comp_err(dev, "kpb_copy(): invalid selector sink pointers.");
 			ret = -EINVAL;
 			break;
 		}
 
-		copy_bytes = audio_stream_get_copy_bytes(&source_c->stream, &sink_c->stream);
+		copy_bytes = audio_stream_get_copy_bytes(&source->stream, &sink->stream);
 		if (!copy_bytes) {
 			comp_err(dev, "kpb_copy(): nothing to copy sink->free %d source->avail %d",
-				 audio_stream_get_free_bytes(&sink_c->stream),
-				 audio_stream_get_avail_bytes(&source_c->stream));
+				 audio_stream_get_free_bytes(&sink->stream),
+				 audio_stream_get_avail_bytes(&source->stream));
 			ret = PPL_STATUS_PATH_STOP;
 			break;
 		}
 
 		if (kpb->num_of_sel_mic == 0) {
-			kpb_copy_samples(sink_c, source_c, copy_bytes, sample_width, channels);
+			kpb_copy_samples(sink, source, copy_bytes, sample_width, channels);
 		} else {
-			uint32_t avail = audio_stream_get_avail_bytes(&source_c->stream);
-			uint32_t free = audio_stream_get_free_bytes(&sink_c->stream);
+			uint32_t avail = audio_stream_get_avail_bytes(&source->stream);
+			uint32_t free = audio_stream_get_free_bytes(&sink->stream);
 
 			copy_bytes = MIN(avail, free * channels / kpb->num_of_sel_mic);
 			copy_bytes = ROUND_DOWN(copy_bytes, (sample_width >> 3) * channels);
@@ -1244,13 +1250,13 @@ static int kpb_copy(struct comp_dev *dev)
 				ret = PPL_STATUS_PATH_STOP;
 				break;
 			}
-			kpb_micselect_copy(dev, sink_c, source_c, produced_bytes, channels);
+			kpb_micselect_copy(dev, sink, source, produced_bytes, channels);
 		}
 		/* Buffer source data internally in history buffer for future
 		 * use by clients.
 		 */
 		if (copy_bytes <= kpb->hd.buffer_size) {
-			ret = kpb_buffer_data(dev, source_c, copy_bytes);
+			ret = kpb_buffer_data(dev, source, copy_bytes);
 
 			if (ret) {
 				comp_err(dev, "kpb_copy(): internal buffering failed.");
@@ -1269,11 +1275,11 @@ static int kpb_copy(struct comp_dev *dev)
 		}
 
 		if (kpb->num_of_sel_mic == 0)
-			comp_update_buffer_produce(sink_c, copy_bytes);
+			comp_update_buffer_produce(sink, copy_bytes);
 		else
-			comp_update_buffer_produce(sink_c, produced_bytes);
+			comp_update_buffer_produce(sink, produced_bytes);
 
-		comp_update_buffer_consume(source_c, copy_bytes);
+		comp_update_buffer_consume(source, copy_bytes);
 
 		break;
 	case KPB_STATE_HOST_COPY:
@@ -1286,20 +1292,18 @@ static int kpb_copy(struct comp_dev *dev)
 			break;
 		}
 
-		sink_c = buffer_acquire(sink);
-
 		/* Validate sink */
-		if (!audio_stream_get_wptr(&sink_c->stream)) {
+		if (!audio_stream_get_wptr(&sink->stream)) {
 			comp_err(dev, "kpb_copy(): invalid host sink pointers.");
 			ret = -EINVAL;
 			break;
 		}
 
-		copy_bytes = audio_stream_get_copy_bytes(&source_c->stream, &sink_c->stream);
+		copy_bytes = audio_stream_get_copy_bytes(&source->stream, &sink->stream);
 		if (!copy_bytes) {
 			comp_err(dev, "kpb_copy(): nothing to copy sink->free %d source->avail %d",
-				 audio_stream_get_free_bytes(&sink_c->stream),
-				 audio_stream_get_avail_bytes(&source_c->stream));
+				 audio_stream_get_free_bytes(&sink->stream),
+				 audio_stream_get_avail_bytes(&source->stream));
 			/* NOTE! We should stop further pipeline copy due to
 			 * no data availability however due to HW bug
 			 * (no HOST DMA IRQs) we need to call host copy
@@ -1308,10 +1312,10 @@ static int kpb_copy(struct comp_dev *dev)
 			break;
 		}
 
-		kpb_copy_samples(sink_c, source_c, copy_bytes, sample_width, channels);
+		kpb_copy_samples(sink, source, copy_bytes, sample_width, channels);
 
-		comp_update_buffer_produce(sink_c, copy_bytes);
-		comp_update_buffer_consume(source_c, copy_bytes);
+		comp_update_buffer_produce(sink, copy_bytes);
+		comp_update_buffer_consume(source, copy_bytes);
 
 		break;
 	case KPB_STATE_INIT_DRAINING:
@@ -1319,12 +1323,12 @@ static int kpb_copy(struct comp_dev *dev)
 		/* In draining and init draining we only buffer data in
 		 * the internal history buffer.
 		 */
-		avail_bytes = audio_stream_get_avail_bytes(&source_c->stream);
+		avail_bytes = audio_stream_get_avail_bytes(&source->stream);
 		copy_bytes = MIN(avail_bytes, kpb->hd.free);
 		ret = PPL_STATUS_PATH_STOP;
 		if (copy_bytes) {
-			buffer_stream_invalidate(source_c, copy_bytes);
-			ret = kpb_buffer_data(dev, source_c, copy_bytes);
+			buffer_stream_invalidate(source, copy_bytes);
+			ret = kpb_buffer_data(dev, source, copy_bytes);
 			dd->buffered_while_draining += copy_bytes;
 			kpb->hd.free -= copy_bytes;
 
@@ -1333,10 +1337,10 @@ static int kpb_copy(struct comp_dev *dev)
 				break;
 			}
 
-			comp_update_buffer_consume(source_c, copy_bytes);
+			comp_update_buffer_consume(source, copy_bytes);
 		} else {
 			comp_warn(dev, "kpb_copy(): buffering skipped (no data to copy, avail %d, free %d",
-				  audio_stream_get_avail_bytes(&source_c->stream),
+				  audio_stream_get_avail_bytes(&source->stream),
 				  kpb->hd.free);
 		}
 
@@ -1347,11 +1351,6 @@ static int kpb_copy(struct comp_dev *dev)
 		ret = -EIO;
 		break;
 	}
-
-out:
-	if (sink_c)
-		buffer_release(sink_c);
-	buffer_release(source_c);
 
 	return ret;
 }
@@ -1365,7 +1364,7 @@ out:
  *
  */
 static int kpb_buffer_data(struct comp_dev *dev,
-			   const struct comp_buffer __sparse_cache *source, size_t size)
+			   const struct comp_buffer *source, size_t size)
 {
 	int ret = 0;
 	size_t size_to_copy = size;
@@ -1729,7 +1728,7 @@ static void kpb_init_draining(struct comp_dev *dev, struct kpb_client *cli)
 static enum task_state kpb_draining_task(void *arg)
 {
 	struct draining_data *draining_data = (struct draining_data *)arg;
-	struct comp_buffer __sparse_cache *sink = buffer_acquire(draining_data->sink);
+	struct comp_buffer *sink = draining_data->sink;
 	struct history_buffer *buff = draining_data->hb;
 	size_t drain_req = draining_data->drain_req;
 	size_t sample_width = draining_data->sample_width;
@@ -1859,13 +1858,9 @@ static enum task_state kpb_draining_task(void *arg)
 out:
 	draining_time_end = sof_cycle_get_64();
 
-	buffer_release(sink);
-
 	/* Reset host-sink copy mode back to its pre-draining value */
-	sink = buffer_acquire(kpb->host_sink);
-	comp_set_attribute(sink->sink, COMP_ATTR_COPY_TYPE,
+	comp_set_attribute(kpb->host_sink->sink, COMP_ATTR_COPY_TYPE,
 			   &kpb->draining_task_data.copy_type);
-	buffer_release(sink);
 
 	draining_time_ms = k_cyc_to_ms_near64(draining_time_end - draining_time_start);
 	if (draining_time_ms <= UINT_MAX)
@@ -1880,7 +1875,7 @@ out:
 
 #ifdef KPB_HIFI3
 static void kpb_convert_24b_to_32b(const void *linear_source, int ioffset,
-				   struct audio_stream __sparse_cache *sink, int ooffset,
+				   struct audio_stream *sink, int ooffset,
 				   unsigned int n_samples)
 {
 	int ssize = audio_stream_sample_bytes(sink);
@@ -1928,7 +1923,7 @@ static void kpb_convert_24b_to_32b(const void *linear_source, int ioffset,
 }
 #else
 static void kpb_convert_24b_to_32b(const void *source, int ioffset,
-				   struct audio_stream __sparse_cache *sink,
+				   struct audio_stream *sink,
 				   int ooffset, unsigned int samples)
 {
 	int ssize = audio_stream_sample_bytes(sink);
@@ -1960,7 +1955,7 @@ static void kpb_convert_24b_to_32b(const void *source, int ioffset,
  *
  * \return none.
  */
-static void kpb_drain_samples(void *source, struct audio_stream __sparse_cache *sink,
+static void kpb_drain_samples(void *source, struct audio_stream *sink,
 			      size_t size, size_t sample_width)
 {
 	unsigned int samples;
@@ -1989,7 +1984,7 @@ static void kpb_drain_samples(void *source, struct audio_stream __sparse_cache *
 }
 
 #ifdef KPB_HIFI3
-static void kpb_convert_32b_to_24b(const struct audio_stream __sparse_cache *source, int ioffset,
+static void kpb_convert_32b_to_24b(const struct audio_stream *source, int ioffset,
 				   void *linear_sink, int ooffset, unsigned int n_samples)
 {
 	int ssize = audio_stream_sample_bytes(source);
@@ -2027,7 +2022,7 @@ static void kpb_convert_32b_to_24b(const struct audio_stream __sparse_cache *sou
 	}
 }
 #else
-static void kpb_convert_32b_to_24b(const struct audio_stream __sparse_cache *source, int ioffset,
+static void kpb_convert_32b_to_24b(const struct audio_stream *source, int ioffset,
 				   void *sink, int ooffset, unsigned int samples)
 {
 	int ssize = audio_stream_sample_bytes(source);
@@ -2060,7 +2055,7 @@ static void kpb_convert_32b_to_24b(const struct audio_stream __sparse_cache *sou
  * \param[in] size Requested copy size in bytes.
  * \param[in] sample_width Sample size.
  */
-static void kpb_buffer_samples(const struct audio_stream __sparse_cache *source,
+static void kpb_buffer_samples(const struct audio_stream *source,
 			       int offset, void *sink, size_t size,
 			       size_t sample_width)
 {
@@ -2147,8 +2142,8 @@ static inline bool kpb_is_sample_width_supported(uint32_t sampling_width)
 }
 
 #ifdef KPB_HIFI3
-static void kpb_copy_24b_in_32b(const struct audio_stream __sparse_cache *source, uint32_t ioffset,
-				struct audio_stream __sparse_cache *sink, uint32_t ooffset,
+static void kpb_copy_24b_in_32b(const struct audio_stream *source, uint32_t ioffset,
+				struct audio_stream *sink, uint32_t ooffset,
 				uint32_t n_samples)
 {
 	int ssize = audio_stream_sample_bytes(source); /* src fmt == sink fmt */
@@ -2181,8 +2176,8 @@ static void kpb_copy_24b_in_32b(const struct audio_stream __sparse_cache *source
 	}
 }
 #else
-static void kpb_copy_24b_in_32b(const struct audio_stream __sparse_cache *source,
-				uint32_t ioffset, struct audio_stream __sparse_cache *sink,
+static void kpb_copy_24b_in_32b(const struct audio_stream *source,
+				uint32_t ioffset, struct audio_stream *sink,
 				uint32_t ooffset, uint32_t samples)
 {
 	int32_t *src = audio_stream_get_rptr(source);
@@ -2217,12 +2212,12 @@ static void kpb_copy_24b_in_32b(const struct audio_stream __sparse_cache *source
  *
  * \return none.
  */
-static void kpb_copy_samples(struct comp_buffer __sparse_cache *sink,
-			     struct comp_buffer __sparse_cache *source, size_t size,
+static void kpb_copy_samples(struct comp_buffer *sink,
+			     struct comp_buffer *source, size_t size,
 			     size_t sample_width, uint32_t channels)
 {
-	struct audio_stream __sparse_cache *istream = &source->stream;
-	struct audio_stream __sparse_cache *ostream = &sink->stream;
+	struct audio_stream *istream = &source->stream;
+	struct audio_stream *ostream = &sink->stream;
 	unsigned int samples;
 
 	buffer_stream_invalidate(source, size);
@@ -2378,15 +2373,196 @@ static int kpb_set_micselect(struct comp_dev *dev, const void *data,
 	return 0;
 }
 
+#ifdef CONFIG_IPC_MAJOR_4
+
+static int devicelist_push(struct device_list *devlist, struct comp_dev **dev)
+{
+	if (devlist->count != DEVICE_LIST_SIZE) {
+		devlist->devs[devlist->count] = dev;
+		devlist->count++;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static void devicelist_reset(struct device_list *devlist, bool remove_items)
+{
+	/* clear items */
+	if (remove_items) {
+		for (int i = 0; i < DEVICE_LIST_SIZE; i++)
+			*devlist->devs[i] = NULL;
+	}
+	/* zero the pointers */
+	for (int i = 0; i < DEVICE_LIST_SIZE; i++)
+		devlist->devs[i] = NULL;
+
+	devlist->count = 0;
+}
+
+static inline int alloc_fmt_module_list_item(struct kpb_fmt_dev_list *fmt_device_list,
+					     struct comp_dev *mi_ptr, struct comp_dev ***item)
+{
+	/* -1 means we did not find the slot yet */
+	int first_empty_slot_idx = -1;
+
+	for (size_t module_slot_idx = 0; module_slot_idx < FAST_MODE_TASK_MAX_MODULES_COUNT;
+	     ++module_slot_idx){
+		/* check if module already added */
+		if (fmt_device_list->modules_list_item[module_slot_idx] == mi_ptr)
+			return -EINVAL;
+		/* finding first available empty slot */
+		if (first_empty_slot_idx < 0 &&
+		    !fmt_device_list->modules_list_item[module_slot_idx])
+			first_empty_slot_idx = module_slot_idx;
+	}
+	/* add item to first available empty slot */
+	if (first_empty_slot_idx >= 0) {
+		fmt_device_list->modules_list_item[first_empty_slot_idx] = mi_ptr;
+		*item = &fmt_device_list->modules_list_item[first_empty_slot_idx];
+		return 0;
+	}
+	return -ENOMEM;
+}
+
+static int prepare_fmt_modules_list(struct comp_dev *kpb_dev,
+				    uint32_t outpin_idx,
+				    const struct kpb_task_params *modules_to_prepare)
+{
+	int ret;
+	struct comp_dev *dev;
+	struct kpb_fmt_dev_list *fmt_device_list =
+		&((struct comp_data *)comp_get_drvdata(kpb_dev))->fmt_device_list;
+
+	fmt_device_list->kpb_list_item[outpin_idx] = kpb_dev;
+	ret = devicelist_push(&fmt_device_list->device_list[outpin_idx],
+			      &fmt_device_list->kpb_list_item[outpin_idx]);
+	if (ret < 0)
+		return ret;
+
+	for (size_t mod_idx = 0; mod_idx < modules_to_prepare->number_of_modules; ++mod_idx) {
+		uint32_t comp_id = IPC4_COMP_ID(modules_to_prepare->dev_ids[mod_idx].module_id,
+						modules_to_prepare->dev_ids[mod_idx].instance_id);
+
+		dev = ipc4_get_comp_dev(comp_id);
+		if (!dev)
+			return -EINVAL;
+
+		struct comp_dev **new_list_item_ptr;
+
+		ret = alloc_fmt_module_list_item(fmt_device_list, dev, &new_list_item_ptr);
+		if (ret < 0)
+			return ret;
+		*new_list_item_ptr = dev;
+		ret = devicelist_push(&fmt_device_list->device_list[outpin_idx],
+				      new_list_item_ptr);
+		if (ret < 0)
+			return ret;
+	}
+	return 0;
+}
+
+static int clear_fmt_modules_list(struct kpb_fmt_dev_list *fmt_device_list,
+				  uint32_t outpin_idx)
+{
+	if (outpin_idx >= KPB_MAX_SINK_CNT)
+		return -EINVAL;
+
+	devicelist_reset(&fmt_device_list->device_list[outpin_idx], true);
+	return 0;
+}
+
+static int unregister_modules_list(struct fast_mode_task *fmt,
+				   struct device_list *list_to_remove, size_t list_idx)
+{
+	if (list_to_remove == fmt->device_list[list_idx]) {
+		fmt->device_list[list_idx] = NULL;
+		return 0;
+	}
+	if (!fmt->device_list[list_idx]) {
+		/* Nothing to do here */
+		return 0;
+	}
+	return -EINVAL;
+}
+
+/* Comment from Old FW, may be outdated:
+ * Important: function below should be called only from within critical section
+ * (Goto KPB for more details)
+ */
+static int register_modules_list(struct fast_mode_task *fmt,
+				 struct device_list *new_list, size_t list_idx)
+{
+	if (list_idx >= ARRAY_SIZE(fmt->device_list))
+		return -EINVAL;
+
+	/* Check if slot is free */
+	if (!fmt->device_list[list_idx]) {
+		fmt->device_list[list_idx] = new_list;
+		return 0;
+	}
+	if (new_list == fmt->device_list[list_idx]) {
+		/* Already registered. */
+		return 0;
+	}
+	/* was ADSP_ALREADY_IN_USE */
+	return -EINVAL;
+}
+
+static int configure_fast_mode_task(struct comp_dev *kpb_dev, const struct kpb_task_params *cfg,
+				    size_t pin)
+{
+	if (pin >= KPB_MAX_SINK_CNT || pin == REALTIME_PIN_ID || !cfg)
+		return -EINVAL;
+
+	struct comp_data *priv_data = (struct comp_data *)comp_get_drvdata(kpb_dev);
+	int ret = unregister_modules_list(&priv_data->fmt,
+					  &priv_data->fmt_device_list.device_list[pin],
+					  pin);
+	if (ret)
+		return -EINVAL;
+
+	ret = clear_fmt_modules_list(&priv_data->fmt_device_list, pin);
+	if (ret)
+		return -EINVAL;
+
+	/* When modules count IS 0 we only need to remove modules from Fast Mode. */
+	if (cfg->number_of_modules > 0) {
+		ret = prepare_fmt_modules_list(kpb_dev, pin, cfg);
+		if (!ret)
+			ret = register_modules_list(&priv_data->fmt,
+						    &priv_data->fmt_device_list.device_list[pin],
+						    pin);
+	}
+	return ret;
+}
+#endif
+
 static int kpb_set_large_config(struct comp_dev *dev, uint32_t param_id,
 				bool first_block,
 				bool last_block,
 				uint32_t data_offset,
 				const char *data)
 {
+	/* We can use extended param id for both extended and standard param id */
+	union ipc4_extended_param_id extended_param_id;
+
 	comp_info(dev, "kpb_set_large_config()");
 
-	switch (param_id) {
+	extended_param_id.full = param_id;
+
+	switch (extended_param_id.part.parameter_type) {
+#ifdef CONFIG_IPC_MAJOR_4
+	case KP_BUF_CFG_FM_MODULE: {
+		/* Modules count equals 0 is a special case in which we want to clear list for
+		 * given pin. Reference FW also allowed for cfg/data to be NULL, but this is no
+		 * longer the case.
+		 */
+		const struct kpb_task_params *cfg = (struct kpb_task_params *)data;
+		uint32_t outpin_id = extended_param_id.part.parameter_instance;
+
+		return configure_fast_mode_task(dev, cfg, outpin_id);
+	}
+#endif
 	case KP_BUF_CLIENT_MIC_SELECT:
 		return kpb_set_micselect(dev, data, data_offset);
 	default:

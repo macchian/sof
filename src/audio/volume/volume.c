@@ -57,7 +57,7 @@ LOG_MODULE_REGISTER(volume, CONFIG_SOF_LOG_LEVEL);
  * \param[in] frames Number of frames.
  * \param[in,out] prev_sum Previous sum of channel samples.
  */
-static uint32_t vol_zc_get_s16(const struct audio_stream __sparse_cache *source,
+static uint32_t vol_zc_get_s16(const struct audio_stream *source,
 			       uint32_t frames, int64_t *prev_sum)
 {
 	uint32_t curr_frames = frames;
@@ -105,7 +105,7 @@ static uint32_t vol_zc_get_s16(const struct audio_stream __sparse_cache *source,
  * \param[in] frames Number of frames.
  * \param[in,out] prev_sum Previous sum of channel samples.
  */
-static uint32_t vol_zc_get_s24(const struct audio_stream __sparse_cache *source,
+static uint32_t vol_zc_get_s24(const struct audio_stream *source,
 			       uint32_t frames, int64_t *prev_sum)
 {
 	int64_t sum;
@@ -153,7 +153,7 @@ static uint32_t vol_zc_get_s24(const struct audio_stream __sparse_cache *source,
  * \param[in] frames Number of frames.
  * \param[in,out] prev_sum Previous sum of channel samples.
  */
-static uint32_t vol_zc_get_s32(const struct audio_stream __sparse_cache *source,
+static uint32_t vol_zc_get_s32(const struct audio_stream *source,
 			       uint32_t frames, int64_t *prev_sum)
 {
 	int64_t sum;
@@ -283,18 +283,22 @@ static inline void volume_ramp(struct processing_module *mod)
 		 * calculated from previous gain and ramp time. The slope
 		 * coefficient is calculated in volume_set_chan().
 		 */
-#if defined CONFIG_COMP_VOLUME_WINDOWS_FADE && defined CONFIG_COMP_VOLUME_LINEAR_RAMP
-		if (cd->ramp_type == SOF_VOLUME_WINDOWS_FADE)
+		switch (cd->ramp_type) {
+#if CONFIG_COMP_VOLUME_WINDOWS_FADE
+		case SOF_VOLUME_WINDOWS_FADE:
 			new_vol = volume_windows_fade_ramp(cd, ramp_time, i);
-		else
-			new_vol = volume_linear_ramp(cd, ramp_time, i);
-#elif defined CONFIG_COMP_VOLUME_WINDOWS_FADE
-		new_vol = volume_windows_fade_ramp(cd, ramp_time, i);
-#elif defined CONFIG_COMP_VOLUME_LINEAR_RAMP
-		new_vol = volume_linear_ramp(cd, ramp_time, i);
-#else
-		new_vol = tvolume;
+			break;
 #endif
+#if CONFIG_COMP_VOLUME_LINEAR_RAMP
+		case SOF_VOLUME_LINEAR:
+		case SOF_VOLUME_LINEAR_ZC:
+			new_vol = volume_linear_ramp(cd, ramp_time, i);
+			break;
+#endif
+		default:
+			new_vol = tvolume;
+		}
+
 		if (volume < tvolume) {
 			/* ramp up, check if ramp completed */
 			if (new_vol < tvolume)
@@ -575,7 +579,7 @@ static int volume_process(struct processing_module *mod,
  * \param[in,out] dev Volume base component device.
  */
 static vol_zc_func vol_get_zc_function(struct comp_dev *dev,
-				       struct comp_buffer __sparse_cache *sinkb)
+				       struct comp_buffer *sinkb)
 {
 	int i;
 
@@ -593,8 +597,8 @@ static vol_zc_func vol_get_zc_function(struct comp_dev *dev,
  * \param[in,out] source Structure pointer of source.
  * \param[in,out] sink Structure pointer of sink.
  */
-static void volume_set_alignment(struct audio_stream __sparse_cache *source,
-				 struct audio_stream __sparse_cache *sink)
+static void volume_set_alignment(struct audio_stream *source,
+				 struct audio_stream *sink)
 {
 #if XCHAL_HAVE_HIFI3 || XCHAL_HAVE_HIFI4
 
@@ -631,14 +635,13 @@ static void volume_set_alignment(struct audio_stream __sparse_cache *source,
  * to also do some type of conversion here.
  */
 static int volume_prepare(struct processing_module *mod,
-			  struct sof_source __sparse_cache **sources, int num_of_sources,
-			  struct sof_sink __sparse_cache **sinks, int num_of_sinks)
+			  struct sof_source **sources, int num_of_sources,
+			  struct sof_sink **sinks, int num_of_sinks)
 {
 	struct vol_data *cd = module_get_private_data(mod);
 	struct module_data *md = &mod->priv;
 	struct comp_dev *dev = mod->dev;
 	struct comp_buffer *sourceb, *sinkb;
-	struct comp_buffer __sparse_cache *source_c, *sink_c;
 	uint32_t sink_period_bytes;
 	int ret;
 	int i;
@@ -653,20 +656,15 @@ static int volume_prepare(struct processing_module *mod,
 	sourceb = list_first_item(&dev->bsource_list,
 				  struct comp_buffer, sink_list);
 
-	sink_c = buffer_acquire(sinkb);
-	source_c = buffer_acquire(sourceb);
-
-	volume_set_alignment(&source_c->stream, &sink_c->stream);
-
-	buffer_release(source_c);
+	volume_set_alignment(&sourceb->stream, &sinkb->stream);
 
 	/* get sink period bytes */
-	sink_period_bytes = audio_stream_period_bytes(&sink_c->stream,
+	sink_period_bytes = audio_stream_period_bytes(&sinkb->stream,
 						      dev->frames);
 
-	if (audio_stream_get_size(&sink_c->stream) < sink_period_bytes) {
+	if (audio_stream_get_size(&sinkb->stream) < sink_period_bytes) {
 		comp_err(dev, "volume_prepare(): sink buffer size %d is insufficient < %d",
-			 audio_stream_get_size(&sink_c->stream), sink_period_bytes);
+			 audio_stream_get_size(&sinkb->stream), sink_period_bytes);
 		ret = -ENOMEM;
 		goto err;
 	}
@@ -680,7 +678,7 @@ static int volume_prepare(struct processing_module *mod,
 		goto err;
 	}
 
-	cd->zc_get = vol_get_zc_function(dev, sink_c);
+	cd->zc_get = vol_get_zc_function(dev, sinkb);
 	if (!cd->zc_get) {
 		comp_err(dev, "volume_prepare(): invalid cd->zc_get");
 		ret = -EINVAL;
@@ -695,16 +693,14 @@ static int volume_prepare(struct processing_module *mod,
 	 */
 	cd->ramp_finished = false;
 
-	cd->channels = audio_stream_get_channels(&sink_c->stream);
+	cd->channels = audio_stream_get_channels(&sinkb->stream);
 	if (cd->channels > SOF_IPC_MAX_CHANNELS) {
 		ret = -EINVAL;
 		goto err;
 	}
 
 	cd->sample_rate_inv = (int32_t)(1000LL * INT32_MAX /
-					audio_stream_get_rate(&sink_c->stream));
-
-	buffer_release(sink_c);
+					audio_stream_get_rate(&sinkb->stream));
 
 	for (i = 0; i < cd->channels; i++) {
 		cd->volume[i] = cd->vol_min;
@@ -725,7 +721,6 @@ static int volume_prepare(struct processing_module *mod,
 	return 0;
 
 err:
-	buffer_release(sink_c);
 	comp_set_state(dev, COMP_TRIGGER_RESET);
 	return ret;
 }
@@ -745,8 +740,8 @@ static int volume_reset(struct processing_module *mod)
 	return 0;
 }
 
-static struct module_interface volume_interface = {
-	.init  = volume_init,
+static const struct module_interface volume_interface = {
+	.init = volume_init,
 	.prepare = volume_prepare,
 	.process_audio_stream = volume_process,
 	.set_configuration = volume_set_config,
@@ -759,8 +754,8 @@ DECLARE_MODULE_ADAPTER(volume_interface, volume_uuid, volume_tr);
 SOF_MODULE_INIT(volume, sys_comp_module_volume_interface_init);
 
 #if CONFIG_COMP_GAIN
-static struct module_interface gain_interface = {
-	.init  = volume_init,
+static const struct module_interface gain_interface = {
+	.init = volume_init,
 	.prepare = volume_prepare,
 	.process_audio_stream = volume_process,
 	.set_configuration = volume_set_config,

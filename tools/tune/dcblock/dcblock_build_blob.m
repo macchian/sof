@@ -1,12 +1,15 @@
-function blob8 = dcblock_build_blob(R_coeffs, endian)
+function blob8 = dcblock_build_blob(R_coeffs, endian, ipc_ver)
 
 %% Settings
-bits_R = 32; %Q2.30
 qy_R = 30;
 
 if nargin < 2
-        endian = 'little'
-endif
+        endian = 'little';
+end
+
+if nargin < 3
+        ipc_ver = 3;
+end
 
 %% Shift values for little/big endian
 switch lower(endian)
@@ -24,7 +27,7 @@ R_coeffs = int32(R_coeffs * bitshift(1, qy_R) + 0.5);
 
 %% Build Blob
 data_size = (num_of_coeffs)*4;
-[abi_bytes, abi_size] = dcblock_get_abi(data_size);
+[abi_bytes, abi_size] = get_abi(data_size, ipc_ver);
 
 blob_size = data_size + abi_size;
 blob8 = uint8(zeros(1, blob_size));
@@ -40,7 +43,7 @@ for i=1:num_of_coeffs
 	j=j+4;
 end
 
-endfunction
+end
 
 function bytes = word2byte(word, sh)
 bytes = uint8(zeros(1,4));

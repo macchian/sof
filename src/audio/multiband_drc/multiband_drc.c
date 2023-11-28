@@ -251,11 +251,10 @@ static int multiband_drc_init(struct processing_module *mod)
 	cd->multiband_drc_func = NULL;
 	cd->crossover_split = NULL;
 #if CONFIG_IPC_MAJOR_4
-	/* Note: Currently there is no ALSA switch control in IPC4 to control
-	 * processing on/off. This workaround can be removed after is available.
-	 * Binary control for configuration blob can be used instead. There is
-	 * no processing bypass control in the blob but all processing can be
-	 * switched to neutral with supported min. 2-band mode.
+	/* Initialize to enabled is a workaround for IPC4 kernel version 6.6 and
+	 * before where the processing is never enabled via switch control. New
+	 * kernel sends the IPC4 switch control and sets this to desired state
+	 * before prepare.
 	 */
 	cd->process_enabled = true;
 #else
@@ -321,18 +320,42 @@ static int multiband_drc_cmd_set_value(struct processing_module *mod,
 }
 #endif
 
-static int multiband_drc_set_config(struct processing_module *mod, uint32_t config_id,
+static int multiband_drc_set_config(struct processing_module *mod, uint32_t param_id,
 				    enum module_cfg_fragment_position pos,
 				    uint32_t data_offset_size, const uint8_t *fragment,
 				    size_t fragment_size, uint8_t *response,
 				    size_t response_size)
 {
 	struct multiband_drc_comp_data *cd = module_get_private_data(mod);
+	struct comp_dev *dev = mod->dev;
 
-	comp_dbg(mod->dev, "multiband_drc_set_config()");
+	comp_dbg(dev, "multiband_drc_set_config()");
 
-#if CONFIG_IPC_MAJOR_3
-	/* Other control types are possible only with IPC3 */
+#if CONFIG_IPC_MAJOR_4
+	struct sof_ipc4_control_msg_payload *ctl = (struct sof_ipc4_control_msg_payload *)fragment;
+
+	switch (param_id) {
+	case SOF_IPC4_SWITCH_CONTROL_PARAM_ID:
+		comp_dbg(dev, "SOF_IPC4_SWITCH_CONTROL_PARAM_ID id = %d, num_elems = %d",
+			 ctl->id, ctl->num_elems);
+
+		if (ctl->id == 0 && ctl->num_elems == 1) {
+			cd->process_enabled = ctl->chanv[0].value;
+			comp_info(dev, "process_enabled = %d", cd->process_enabled);
+		} else {
+			comp_err(dev, "Illegal control id = %d, num_elems = %d",
+				 ctl->id, ctl->num_elems);
+			return -EINVAL;
+		}
+
+		return 0;
+
+	case SOF_IPC4_ENUM_CONTROL_PARAM_ID:
+		comp_err(dev, "multiband_drc_set_config(), illegal control.");
+		return -EINVAL;
+	}
+
+#elif CONFIG_IPC_MAJOR_3
 	struct sof_ipc_ctrl_data *cdata = (struct sof_ipc_ctrl_data *)fragment;
 
 	if (cdata->cmd != SOF_CTRL_CMD_BINARY)
@@ -388,8 +411,8 @@ static int multiband_drc_get_config(struct processing_module *mod,
 	return comp_data_blob_get_cmd(cd->model_handler, cdata, fragment_size);
 }
 
-static void multiband_drc_set_alignment(struct audio_stream __sparse_cache *source,
-					struct audio_stream __sparse_cache *sink)
+static void multiband_drc_set_alignment(struct audio_stream *source,
+					struct audio_stream *sink)
 {
 	/* Currently no optimizations those would use wider loads and stores */
 	audio_stream_init_alignment_constants(1, 1, source);
@@ -403,8 +426,8 @@ static int multiband_drc_process(struct processing_module *mod,
 {
 	struct multiband_drc_comp_data *cd =  module_get_private_data(mod);
 	struct comp_dev *dev = mod->dev;
-	struct audio_stream __sparse_cache *source = input_buffers[0].data;
-	struct audio_stream __sparse_cache *sink = output_buffers[0].data;
+	struct audio_stream *source = input_buffers[0].data;
+	struct audio_stream *sink = output_buffers[0].data;
 	int frames = input_buffers[0].size;
 	int ret;
 
@@ -435,7 +458,6 @@ static int multiband_drc_params(struct processing_module *mod)
 	struct sof_ipc_stream_params comp_params;
 	struct comp_dev *dev = mod->dev;
 	struct comp_buffer *sinkb;
-	struct comp_buffer __sparse_cache *sink_c;
 	enum sof_ipc_frame valid_fmt, frame_fmt;
 	int i, ret;
 
@@ -458,21 +480,19 @@ static int multiband_drc_params(struct processing_module *mod)
 
 	component_set_nearest_period_frames(dev, comp_params.rate);
 	sinkb = list_first_item(&dev->bsink_list, struct comp_buffer, source_list);
-	sink_c = buffer_acquire(sinkb);
-	ret = buffer_set_params(sink_c, &comp_params, true);
-	buffer_release(sink_c);
+	ret = buffer_set_params(sinkb, &comp_params, true);
+
 	return ret;
 }
 #endif /* CONFIG_IPC_MAJOR_4 */
 
 static int multiband_drc_prepare(struct processing_module *mod,
-				 struct sof_source __sparse_cache **sources, int num_of_sources,
-				 struct sof_sink __sparse_cache **sinks, int num_of_sinks)
+				 struct sof_source **sources, int num_of_sources,
+				 struct sof_sink **sinks, int num_of_sinks)
 {
 	struct multiband_drc_comp_data *cd = module_get_private_data(mod);
 	struct comp_dev *dev = mod->dev;
 	struct comp_buffer *sourceb, *sinkb;
-	struct comp_buffer __sparse_cache *source_c, *sink_c;
 	int channels;
 	int rate;
 	int ret = 0;
@@ -489,17 +509,12 @@ static int multiband_drc_prepare(struct processing_module *mod,
 	sourceb = list_first_item(&dev->bsource_list, struct comp_buffer, sink_list);
 	sinkb = list_first_item(&dev->bsink_list, struct comp_buffer, source_list);
 
-	source_c = buffer_acquire(sourceb);
-	sink_c = buffer_acquire(sinkb);
-	multiband_drc_set_alignment(&source_c->stream, &sink_c->stream);
+	multiband_drc_set_alignment(&sourceb->stream, &sinkb->stream);
 
 	/* get source data format */
-	cd->source_format = audio_stream_get_frm_fmt(&source_c->stream);
-	channels = audio_stream_get_channels(&source_c->stream);
-	rate = audio_stream_get_rate(&source_c->stream);
-
-	buffer_release(sink_c);
-	buffer_release(source_c);
+	cd->source_format = audio_stream_get_frm_fmt(&sourceb->stream);
+	channels = audio_stream_get_channels(&sourceb->stream);
+	rate = audio_stream_get_rate(&sourceb->stream);
 
 	/* Initialize DRC */
 	comp_dbg(dev, "multiband_drc_prepare(), source_format=%d, sink_format=%d",
@@ -551,8 +566,8 @@ static int multiband_drc_reset(struct processing_module *mod)
 	return 0;
 }
 
-static struct module_interface multiband_drc_interface = {
-	.init  = multiband_drc_init,
+static const struct module_interface multiband_drc_interface = {
+	.init = multiband_drc_init,
 	.prepare = multiband_drc_prepare,
 	.process_audio_stream = multiband_drc_process,
 	.set_configuration = multiband_drc_set_config,

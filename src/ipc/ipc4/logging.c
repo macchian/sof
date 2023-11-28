@@ -4,18 +4,27 @@
 //
 // Author: Kai Vehmanen <kai.vehmanen@linux.intel.com>
 
+#if CONFIG_LOG_BACKEND_SOF_PROBE && CONFIG_LOG_BACKEND_ADSP_MTRACE
+#error Cannot have both backends enabled
+#endif
+
 #include <stdint.h>
 #include <sof/lib/uuid.h>
 #include <sof/ipc/common.h>
 #include <ipc4/base_fw.h>
 #include <ipc4/error_status.h>
 #include <ipc4/logging.h>
+#if !CONFIG_LIBRARY
+#include <zephyr/logging/log_backend.h>
+#include <zephyr/logging/log.h>
+#endif
+#if CONFIG_LOG_BACKEND_SOF_PROBE
+#include <sof/probe/probe.h>
+#endif
 
 #ifdef CONFIG_LOG_BACKEND_ADSP_MTRACE
 
-#include <zephyr/logging/log_backend.h>
 #include <zephyr/logging/log_backend_adsp_mtrace.h>
-#include <zephyr/logging/log.h>
 
 #include <sof/schedule/edf_schedule.h>
 #include <sof/schedule/schedule.h>
@@ -150,16 +159,45 @@ int ipc4_logging_enable_logs(bool first_block,
 	return 0;
 }
 
-int ipc4_logging_shutdown(void)
+#elif CONFIG_LOG_BACKEND_SOF_PROBE
+
+int ipc4_logging_enable_logs(bool first_block,
+			     bool last_block,
+			     uint32_t data_offset_or_size,
+			     const char *data)
 {
-	struct ipc4_log_state_info log_state = { 0 };
+	const struct log_backend *log_backend = log_backend_probe_get();
+	const struct ipc4_log_state_info *log_state;
 
-	/* log_state.enable set to 0 above */
+	if (!(first_block && last_block))
+		return -EINVAL;
 
-	return ipc4_logging_enable_logs(true, true, sizeof(log_state), (char *)&log_state);
+	if (data_offset_or_size < sizeof(struct ipc4_log_state_info))
+		return -EINVAL;
+
+	/* Make sure we work on correct ipc data by invalidating cache
+	 * data may be taken from different core to the one we are working
+	 * on right now.
+	 */
+	dcache_invalidate_region((__sparse_force void __sparse_cache *)data, data_offset_or_size);
+
+	log_state = (const struct ipc4_log_state_info *)data;
+
+	if (log_state->enable) {
+		if (!probe_is_backend_configured())
+			return -EINVAL;
+
+		log_backend_activate(log_backend, probe_logging_hook);
+
+	} else  {
+		log_backend_deactivate(log_backend);
+	}
+
+	return 0;
 }
 
-#else
+#else /* unsupported logging method */
+
 int ipc4_logging_enable_logs(bool first_block,
 			     bool last_block,
 			     uint32_t data_offset_or_size,
@@ -168,9 +206,13 @@ int ipc4_logging_enable_logs(bool first_block,
 	return IPC4_UNKNOWN_MESSAGE_TYPE;
 }
 
+#endif
+
 int ipc4_logging_shutdown(void)
 {
-	return 0;
-}
+	struct ipc4_log_state_info log_state = { 0 };
 
-#endif
+	/* log_state.enable set to 0 above */
+
+	return ipc4_logging_enable_logs(true, true, sizeof(log_state), (char *)&log_state);
+}

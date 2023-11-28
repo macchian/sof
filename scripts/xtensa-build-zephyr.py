@@ -176,9 +176,6 @@ def parse_args():
 						help="List of platforms to build")
 	parser.add_argument("-d", "--debug", required=False, action="store_true",
 						help="Shortcut for: -o sof/app/debug_overlay.conf")
-	parser.add_argument("-i", "--ipc", required=False, choices=["IPC4"],
-			    help="""Applies --overlay <platform>/ipc4_overlay.conf
-and a different rimage config. Valid only for IPC3 platforms supporting IPC4 too.""")
     # NO SOF release will ever user the option --fw-naming.
     # This option is only for disguising SOF IPC4 as CAVS IPC4 and only in cases where
     # the kernel 'ipc_type' expects CAVS IPC4. In this way, developers and CI can test
@@ -265,10 +262,6 @@ This should be used with programmatic script invocations (eg. Continuous Integra
 		if not args.use_platform_subdir:
 			args.use_platform_subdir=True
 			warnings.warn("The option '--fw-naming AVS' has to be used with '--use-platform-subdir'. Enable '--use-platform-subdir' automatically.")
-		if args.ipc != "IPC4":
-			args.ipc="IPC4"
-			warnings.warn("The option '--fw-naming AVS' has to be used with '-i IPC4'. Enable '-i IPC4' automatically.")
-
 
 def execute_command(*run_args, **run_kwargs):
 	"""[summary] Provides wrapper for subprocess.run that prints
@@ -519,7 +512,7 @@ RIMAGE_BUILD_DIR  = west_top / "build-rimage"
 # for now we must stick to `sof/rimage/[tomlc99]` for
 # backwards-compatibility with XTOS platforms and git submodules, see more
 # detailed comments in west.yml
-RIMAGE_SOURCE_DIR = west_top / "sof" / "rimage"
+RIMAGE_SOURCE_DIR = west_top / "sof" / "tools" / "rimage"
 
 
 def rimage_west_configuration(platform_dict, dest_dir):
@@ -570,14 +563,11 @@ def rimage_west_configuration(platform_dict, dest_dir):
 
 def build_rimage():
 
-	# Detect non-west rimage duplicates, example: git submdule
-	# SOF_TOP/rimage = sof2/rimage
-	nested_rimage = pathlib.Path(SOF_TOP, "rimage")
-	if nested_rimage.is_dir() and not nested_rimage.samefile(RIMAGE_SOURCE_DIR):
-		raise RuntimeError(
-			f"""Two rimage source directories found.
-     Move non-west {nested_rimage} out of west workspace {west_top}.
-     See output of 'west list'."""
+	old_rimage_loc = SOF_TOP / "rimage"
+	# Don't warn on empty directories
+	if ( old_rimage_loc  / "CMakeLists.txt" ).exists():
+		warnings.warn(f"""{old_rimage_loc} is now ignored,
+		new location is {RIMAGE_SOURCE_DIR}"""
 		)
 	rimage_dir_name = RIMAGE_BUILD_DIR.name
 	# CMake build rimage module
@@ -626,7 +616,7 @@ def rimage_options(platform_dict):
 	#                         test_00_01_load_fw_and_check_version
 	opts.append(("-b", "1"))
 
-	if args.ipc == "IPC4":
+	if platform_dict.get("IPC4_RIMAGE_DESC", None) is not None:
 		rimage_desc = platform_dict["IPC4_RIMAGE_DESC"]
 	else:
 		rimage_desc = platform_dict["name"] + ".toml"
@@ -724,13 +714,6 @@ def build_platforms():
 		# if both are provided, because it's no harm to merge the same overlay twice.
 		if args.debug:
 			overlays.append(str(pathlib.Path(SOF_TOP, "app", "debug_overlay.conf")))
-
-		# The '-i IPC4' is a shortcut for '-o path_to_ipc4_overlay' (and more), we
-		# are good if both are provided, because it's no harm to merge the same
-		# overlay twice.
-		if args.ipc == "IPC4":
-			overlays.append(str(pathlib.Path(SOF_TOP, "app", "overlays", platform,
-                            platform_dict["IPC4_CONFIG_OVERLAY"])))
 
 		if overlays:
 			overlays = ";".join(overlays)

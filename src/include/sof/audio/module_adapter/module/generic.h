@@ -15,11 +15,27 @@
 #include <sof/audio/component.h>
 #include <sof/ut.h>
 #include <sof/lib/memory.h>
+#include <sof/audio/sink_api.h>
+#include <sof/audio/source_api.h>
+#include <sof/audio/dp_queue.h>
 #include "module_interface.h"
 
 #if CONFIG_INTEL_MODULES
 #include "modules.h"
 #endif
+
+/*
+ * helpers to determine processing type
+ * Needed till all the modules use PROCESSING_MODE_SINK_SOURCE
+ */
+#define IS_PROCESSING_MODE_AUDIO_STREAM(mod) \
+		(!!((struct module_data *)&(mod)->priv)->ops->process_audio_stream)
+
+#define IS_PROCESSING_MODE_RAW_DATA(mod) \
+		(!!((struct module_data *)&(mod)->priv)->ops->process_raw_data)
+
+#define IS_PROCESSING_MODE_SINK_SOURCE(mod) \
+		(!!((struct module_data *)&(mod)->priv)->ops->process)
 
 #define module_get_private_data(mod) (mod->priv.private)
 #define MAX_BLOB_SIZE 8192
@@ -155,21 +171,11 @@ struct module_data {
 	void *private; /**< self object, memory tables etc here */
 	void *runtime_params;
 	struct module_config cfg; /**< module configuration data */
-	struct module_interface *ops; /**< module specific operations */
+	const struct module_interface *ops; /**< module specific operations */
 	struct module_memory memory; /**< memory allocated by module */
 	struct module_processing_data mpd; /**< shared data comp <-> module */
 	void *module_adapter; /**<loadable module interface handle */
 	uint32_t module_entry_point; /**<loadable module entry point address */
-};
-
-/*
- * Used by the module to keep track of the number of sources bound to it and can be accessed
- * from different cores
- */
-struct module_source_info {
-	struct coherent c;
-	struct comp_dev *sources[MODULE_MAX_SOURCES];
-	void *private; /**< additional module-specific private info */
 };
 
 /* module_adapter private, runtime data */
@@ -186,10 +192,33 @@ struct processing_module {
 	uint32_t period_bytes; /** pipeline period bytes */
 	uint32_t deep_buff_bytes; /**< copy start threshold */
 	uint32_t output_buffer_size; /**< size of local buffer to save produced samples */
-	struct input_stream_buffer *input_buffers;
-	struct output_stream_buffer *output_buffers;
-	uint32_t num_input_buffers; /**< number of input buffers */
-	uint32_t num_output_buffers; /**< number of output buffers */
+
+	/* number of sinks / sources and (when in use) input_buffers / input_buffers */
+	uint32_t num_of_sources;
+	uint32_t num_of_sinks;
+
+	/* sink and source handlers for the module */
+	struct sof_sink *sinks[MODULE_MAX_SOURCES];
+	struct sof_source *sources[MODULE_MAX_SOURCES];
+
+	union {
+		struct {
+			/* this is used in case of raw data or audio_stream mode
+			 * number of buffers described by fields:
+			 * input_buffers  - num_of_sources
+			 * output_buffers - num_of_sinks
+			 */
+			struct input_stream_buffer *input_buffers;
+			struct output_stream_buffer *output_buffers;
+		};
+		struct {
+			/* this is used in case of DP processing
+			 * dev->ipc_config.proc_domain == COMP_PROCESSING_DOMAIN_DP
+			 */
+			struct list_item dp_queue_ll_to_dp_list;
+			struct list_item dp_queue_dp_to_ll_list;
+		};
+	};
 	struct comp_buffer *source_comp_buffer; /**< single source component buffer */
 	struct comp_buffer *sink_comp_buffer; /**< single sink compoonent buffer */
 
@@ -224,9 +253,6 @@ struct processing_module {
 	/* pointer to system services for loadable modules */
 	uint32_t *sys_service;
 
-	/* table containing the list of connected sources */
-	struct module_source_info *source_info;
-
 	/* total processed data after stream started */
 	uint64_t total_data_consumed;
 	uint64_t total_data_produced;
@@ -240,19 +266,19 @@ struct processing_module {
 /* Module generic interfaces						     */
 /*****************************************************************************/
 int module_load_config(struct comp_dev *dev, const void *cfg, size_t size);
-int module_init(struct processing_module *mod, struct module_interface *interface);
+int module_init(struct processing_module *mod, const struct module_interface *interface);
 void *module_allocate_memory(struct processing_module *mod, uint32_t size, uint32_t alignment);
 int module_free_memory(struct processing_module *mod, void *ptr);
 void module_free_all_memory(struct processing_module *mod);
 int module_prepare(struct processing_module *mod,
-		   struct sof_source __sparse_cache **sources, int num_of_sources,
-		   struct sof_sink __sparse_cache **sinks, int num_of_sinks);
+		   struct sof_source **sources, int num_of_sources,
+		   struct sof_sink **sinks, int num_of_sinks);
 
 static inline
 bool module_is_ready_to_process(struct processing_module *mod,
-				struct sof_source __sparse_cache **sources,
+				struct sof_source **sources,
 				int num_of_sources,
-				struct sof_sink __sparse_cache **sinks,
+				struct sof_sink **sinks,
 				int num_of_sinks)
 {
 	struct module_data *md = &mod->priv;
@@ -267,13 +293,13 @@ bool module_is_ready_to_process(struct processing_module *mod,
 	/* default action - the module is ready if there's enough data for processing and enough
 	 * space to store result. IBS/OBS as declared in init_instance
 	 */
-	return (source_get_data_available(sources[0]) >= source_get_ibs(sources[0]) &&
-		sink_get_free_size(sinks[0]) >= sink_get_obs(sinks[0]));
+	return (source_get_data_available(sources[0]) >= source_get_min_available(sources[0]) &&
+		sink_get_free_size(sinks[0]) >= sink_get_min_free_space(sinks[0]));
 }
 
 int module_process_sink_src(struct processing_module *mod,
-			    struct sof_source __sparse_cache **sources, int num_of_sources,
-			    struct sof_sink __sparse_cache **sinks, int num_of_sinks);
+			    struct sof_source **sources, int num_of_sources,
+			    struct sof_sink **sinks, int num_of_sinks);
 int module_process_legacy(struct processing_module *mod,
 			  struct input_stream_buffer *input_buffers, int num_input_buffers,
 			  struct output_stream_buffer *output_buffers,
@@ -290,7 +316,7 @@ int module_unbind(struct processing_module *mod, void *data);
 
 struct comp_dev *module_adapter_new(const struct comp_driver *drv,
 				    const struct comp_ipc_config *config,
-				    struct module_interface *interface, const void *spec);
+				    const struct module_interface *interface, const void *spec);
 int module_adapter_prepare(struct comp_dev *dev);
 int module_adapter_params(struct comp_dev *dev, struct sof_ipc_stream_params *params);
 int module_adapter_copy(struct comp_dev *dev);
@@ -298,6 +324,58 @@ int module_adapter_cmd(struct comp_dev *dev, int cmd, void *data, int max_data_s
 int module_adapter_trigger(struct comp_dev *dev, int cmd);
 void module_adapter_free(struct comp_dev *dev);
 int module_adapter_reset(struct comp_dev *dev);
+
+#if CONFIG_IPC_MAJOR_3
+static inline
+int module_adapter_get_attribute(struct comp_dev *dev, uint32_t type, void *value)
+{
+	return -EINVAL;
+}
+
+static inline
+int module_set_large_config(struct comp_dev *dev, uint32_t param_id, bool first_block,
+			    bool last_block, uint32_t data_offset, const char *data)
+{
+	return 0;
+}
+
+static inline
+int module_get_large_config(struct comp_dev *dev, uint32_t param_id, bool first_block,
+			    bool last_block, uint32_t *data_offset, char *data)
+{
+	return 0;
+}
+
+static inline
+int module_adapter_bind(struct comp_dev *dev, void *data)
+{
+	return 0;
+}
+
+static inline
+int module_adapter_unbind(struct comp_dev *dev, void *data)
+{
+	return 0;
+}
+
+static inline
+uint64_t module_adapter_get_total_data_processed(struct comp_dev *dev,
+						 uint32_t stream_no, bool input)
+{
+	return 0;
+}
+
+static inline int module_process_endpoint(struct processing_module *mod,
+					  struct input_stream_buffer *input_buffers,
+					  int num_input_buffers,
+					  struct output_stream_buffer *output_buffers,
+					  int num_output_buffers)
+{
+	return module_process_legacy(mod, input_buffers, num_input_buffers,
+				     output_buffers, num_output_buffers);
+}
+
+#else
 int module_set_large_config(struct comp_dev *dev, uint32_t param_id, bool first_block,
 			    bool last_block, uint32_t data_offset, const char *data);
 int module_get_large_config(struct comp_dev *dev, uint32_t param_id, bool first_block,
@@ -307,60 +385,12 @@ int module_adapter_bind(struct comp_dev *dev, void *data);
 int module_adapter_unbind(struct comp_dev *dev, void *data);
 uint64_t module_adapter_get_total_data_processed(struct comp_dev *dev,
 						 uint32_t stream_no, bool input);
-int module_adapter_get_hw_params(struct comp_dev *dev, struct sof_ipc_stream_params *params,
-				 int dir);
-int module_adapter_position(struct comp_dev *dev, struct sof_ipc_stream_posn *posn);
-int module_adapter_ts_config_op(struct comp_dev *dev);
-int module_adapter_ts_start_op(struct comp_dev *dev);
-int module_adapter_ts_stop_op(struct comp_dev *dev);
-int module_adapter_ts_get_op(struct comp_dev *dev, struct timestamp_data *tsd);
 
-static inline void module_update_buffer_position(struct input_stream_buffer *input_buffers,
-						 struct output_stream_buffer *output_buffers,
-						 uint32_t frames)
-{
-	struct audio_stream __sparse_cache *source = input_buffers->data;
-	struct audio_stream __sparse_cache *sink = output_buffers->data;
-
-	input_buffers->consumed += audio_stream_frame_bytes(source) * frames;
-	output_buffers->size += audio_stream_frame_bytes(sink) * frames;
-}
-
-__must_check static inline
-struct module_source_info __sparse_cache *module_source_info_acquire(struct module_source_info *msi)
-{
-	struct coherent __sparse_cache *c;
-
-	c = coherent_acquire_thread(&msi->c, sizeof(*msi));
-
-	return attr_container_of(c, struct module_source_info __sparse_cache, c, __sparse_cache);
-}
-
-static inline void module_source_info_release(struct module_source_info __sparse_cache *msi)
-{
-	coherent_release_thread(&msi->c, sizeof(*msi));
-}
-
-/* when source argument is NULL, this function returns the first unused entry */
-static inline
-int find_module_source_index(struct module_source_info __sparse_cache *msi,
-			     const struct comp_dev *source)
-{
-	int i;
-
-	for (i = 0; i < MODULE_MAX_SOURCES; i++) {
-		if (msi->sources[i] == source)
-			return i;
-	}
-
-	return -EINVAL;
-}
-
-static inline int module_process_stream(struct processing_module *mod,
-					struct input_stream_buffer *input_buffers,
-					int num_input_buffers,
-					struct output_stream_buffer *output_buffers,
-					int num_output_buffers)
+static inline int module_process_endpoint(struct processing_module *mod,
+					  struct input_stream_buffer *input_buffers,
+					  int num_input_buffers,
+					  struct output_stream_buffer *output_buffers,
+					  int num_output_buffers)
 {
 	struct module_data *md = &mod->priv;
 
@@ -368,4 +398,32 @@ static inline int module_process_stream(struct processing_module *mod,
 					     output_buffers, num_output_buffers);
 }
 
+#endif
+
+int module_adapter_get_hw_params(struct comp_dev *dev, struct sof_ipc_stream_params *params,
+				 int dir);
+int module_adapter_position(struct comp_dev *dev, struct sof_ipc_stream_posn *posn);
+int module_adapter_ts_config_op(struct comp_dev *dev);
+int module_adapter_ts_start_op(struct comp_dev *dev);
+int module_adapter_ts_stop_op(struct comp_dev *dev);
+#if CONFIG_ZEPHYR_NATIVE_DRIVERS
+int module_adapter_ts_get_op(struct comp_dev *dev, struct dai_ts_data *tsd);
+#else
+int module_adapter_ts_get_op(struct comp_dev *dev, struct timestamp_data *tsd);
+#endif
+
+void module_update_buffer_position(struct input_stream_buffer *input_buffers,
+				   struct output_stream_buffer *output_buffers,
+				   uint32_t frames);
+
+int module_adapter_init_data(struct comp_dev *dev,
+			     struct module_config *dst,
+			     const struct comp_ipc_config *config,
+			     const void *spec);
+void module_adapter_reset_data(struct module_config *dst);
+void module_adapter_check_data(struct processing_module *mod, struct comp_dev *dev,
+			       struct comp_buffer *sink);
+void module_adapter_set_params(struct processing_module *mod, struct sof_ipc_stream_params *params);
+int module_adapter_set_state(struct processing_module *mod, struct comp_dev *dev,
+			     int cmd);
 #endif /* __SOF_AUDIO_MODULE_GENERIC__ */

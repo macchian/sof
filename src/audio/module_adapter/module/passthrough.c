@@ -21,8 +21,8 @@ static int passthrough_codec_init(struct processing_module *mod)
 }
 
 static int passthrough_codec_prepare(struct processing_module *mod,
-				     struct sof_source __sparse_cache **sources, int num_of_sources,
-				     struct sof_sink __sparse_cache **sinks, int num_of_sinks)
+				     struct sof_source **sources, int num_of_sources,
+				     struct sof_sink **sinks, int num_of_sinks)
 {
 	struct comp_dev *dev = mod->dev;
 	struct module_data *codec = &mod->priv;
@@ -116,8 +116,8 @@ static int passthrough_codec_free(struct processing_module *mod)
 	return 0;
 }
 
-static struct module_interface passthrough_interface = {
-	.init  = passthrough_codec_init,
+static const struct module_interface passthrough_interface = {
+	.init = passthrough_codec_init,
 	.prepare = passthrough_codec_prepare,
 	.process_raw_data = passthrough_codec_process,
 	.reset = passthrough_codec_reset,

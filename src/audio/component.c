@@ -158,8 +158,8 @@ void sys_comp_init(struct sof *sof)
 	k_spinlock_init(&sof->comp_drivers->lock);
 }
 
-void comp_get_copy_limits(struct comp_buffer __sparse_cache *source,
-			  struct comp_buffer __sparse_cache *sink,
+void comp_get_copy_limits(struct comp_buffer *source,
+			  struct comp_buffer *sink,
 			  struct comp_copy_limits *cl)
 {
 	cl->frames = audio_stream_avail_frames(&source->stream, &sink->stream);
@@ -169,8 +169,8 @@ void comp_get_copy_limits(struct comp_buffer __sparse_cache *source,
 	cl->sink_bytes = cl->frames * cl->sink_frame_bytes;
 }
 
-void comp_get_copy_limits_frame_aligned(const struct comp_buffer __sparse_cache *source,
-					const struct comp_buffer __sparse_cache *sink,
+void comp_get_copy_limits_frame_aligned(const struct comp_buffer *source,
+					const struct comp_buffer *sink,
 					struct comp_copy_limits *cl)
 {
 	cl->frames = audio_stream_avail_frames_aligned(&source->stream, &sink->stream);
@@ -182,8 +182,8 @@ void comp_get_copy_limits_frame_aligned(const struct comp_buffer __sparse_cache 
 
 #ifdef STREAMCOPY_HIFI3
 
-int audio_stream_copy(const struct audio_stream __sparse_cache *source, uint32_t ioffset,
-		      struct audio_stream __sparse_cache *sink, uint32_t ooffset, uint32_t samples)
+int audio_stream_copy(const struct audio_stream *source, uint32_t ioffset,
+		      struct audio_stream *sink, uint32_t ooffset, uint32_t samples)
 {
 	int ssize = audio_stream_sample_bytes(source); /* src fmt == sink fmt */
 	ae_int16x4 *src = (ae_int16x4 *)((int8_t *)audio_stream_get_rptr(source) + ioffset * ssize);
@@ -227,8 +227,8 @@ int audio_stream_copy(const struct audio_stream __sparse_cache *source, uint32_t
 
 #else
 
-int audio_stream_copy(const struct audio_stream __sparse_cache *source, uint32_t ioffset,
-		      struct audio_stream __sparse_cache *sink, uint32_t ooffset, uint32_t samples)
+int audio_stream_copy(const struct audio_stream *source, uint32_t ioffset,
+		      struct audio_stream *sink, uint32_t ooffset, uint32_t samples)
 {
 	int ssize = audio_stream_sample_bytes(source); /* src fmt == sink fmt */
 	uint8_t *src = audio_stream_wrap(source, (uint8_t *)audio_stream_get_rptr(source) +
@@ -279,7 +279,7 @@ void cir_buf_copy(void *src, void *src_addr, void *src_end, void *dst,
 }
 
 void audio_stream_copy_from_linear(const void *linear_source, int ioffset,
-				   struct audio_stream __sparse_cache *sink, int ooffset,
+				   struct audio_stream *sink, int ooffset,
 				   unsigned int samples)
 {
 	int ssize = audio_stream_sample_bytes(sink); /* src fmt == sink fmt */
@@ -300,7 +300,7 @@ void audio_stream_copy_from_linear(const void *linear_source, int ioffset,
 	}
 }
 
-void audio_stream_copy_to_linear(const struct audio_stream __sparse_cache *source, int ioffset,
+void audio_stream_copy_to_linear(const struct audio_stream *source, int ioffset,
 				 void *linear_sink, int ooffset, unsigned int samples)
 {
 	int ssize = audio_stream_sample_bytes(source); /* src fmt == sink fmt */
@@ -328,9 +328,25 @@ int comp_copy(struct comp_dev *dev)
 
 	assert(dev->drv->ops.copy);
 
-	/* copy only if we are the owner of the LL component */
-	if (dev->ipc_config.proc_domain == COMP_PROCESSING_DOMAIN_LL &&
-	    cpu_is_me(dev->ipc_config.core)) {
+	/* copy only if we are the owner of component OR this is DP component
+	 *
+	 * DP components (modules) require two stage processing:
+	 *
+	 *   LL_mod -> [comp_buffer -> dp_queue] -> dp_mod -> [dp_queue -> comp_buffer] -> LL_mod
+	 *
+	 *  - in first step (it means - now) the pipeline must copy source data from comp_buffer
+	 *    to dp_queue and result data from dp_queue to comp_buffer
+	 *
+	 *  - second step will be performed by a thread specific to the DP module - DP module
+	 *    will take data from input dpQueue (using source API) , process it
+	 *    and put in output DP queue (using sink API)
+	 *
+	 * this allows the current pipeline structure to see a DP module as a "normal" LL
+	 *
+	 * to be removed when pipeline 2.0 is ready
+	 */
+	if (cpu_is_me(dev->ipc_config.core) ||
+	    dev->ipc_config.proc_domain == COMP_PROCESSING_DOMAIN_DP) {
 #if CONFIG_PERFORMANCE_COUNTERS
 		perf_cnt_init(&dev->pcd);
 #endif

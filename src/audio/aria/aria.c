@@ -72,8 +72,8 @@ static int aria_algo_init(struct aria_data *cd, void *buffer_desc,
 }
 
 static inline void aria_process_data(struct processing_module *mod,
-				     struct audio_stream __sparse_cache *source,
-				     struct audio_stream __sparse_cache *sink,
+				     struct audio_stream *source,
+				     struct audio_stream *sink,
 				     size_t frames)
 {
 	struct aria_data *cd = module_get_private_data(mod);
@@ -153,24 +153,19 @@ static int aria_free(struct processing_module *mod)
 static void aria_set_stream_params(struct comp_buffer *buffer,
 				   struct processing_module *mod)
 {
-	struct comp_buffer __sparse_cache *buffer_c;
 	const struct ipc4_audio_format *audio_fmt = &mod->priv.cfg.base_cfg.audio_fmt;
 
-	buffer_c = buffer_acquire(buffer);
-
-	ipc4_update_buffer_format(buffer_c, audio_fmt);
+	ipc4_update_buffer_format(buffer, audio_fmt);
 #ifdef ARIA_GENERIC
-	audio_stream_init_alignment_constants(1, 1, &buffer_c->stream);
+	audio_stream_init_alignment_constants(1, 1, &buffer->stream);
 #else
-	audio_stream_init_alignment_constants(8, 1, &buffer_c->stream);
+	audio_stream_init_alignment_constants(8, 1, &buffer->stream);
 #endif
-
-	buffer_release(buffer_c);
 }
 
 static int aria_prepare(struct processing_module *mod,
-			struct sof_source __sparse_cache **sources, int num_of_sources,
-			struct sof_sink __sparse_cache **sinks, int num_of_sinks)
+			struct sof_source **sources, int num_of_sources,
+			struct sof_sink **sinks, int num_of_sinks)
 {
 	int ret;
 	struct comp_buffer *source, *sink;
@@ -254,8 +249,8 @@ static int aria_process(struct processing_module *mod,
 	return 0;
 }
 
-static struct module_interface aria_interface = {
-	.init  = aria_init,
+static const struct module_interface aria_interface = {
+	.init = aria_init,
 	.prepare = aria_prepare,
 	.process_audio_stream = aria_process,
 	.reset = aria_reset,

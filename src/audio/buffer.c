@@ -27,10 +27,10 @@ DECLARE_SOF_RT_UUID("buffer", buffer_uuid, 0x42544c92, 0x8e92, 0x4e41,
 		 0xb6, 0x79, 0x34, 0x51, 0x9f, 0x1c, 0x1d, 0x28);
 DECLARE_TR_CTX(buffer_tr, SOF_UUID(buffer_uuid), LOG_LEVEL_INFO);
 
-struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t flags, uint32_t align)
+struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t flags, uint32_t align,
+				 bool is_shared)
 {
 	struct comp_buffer *buffer;
-	struct comp_buffer __sparse_cache *buffer_c;
 	void *stream_addr;
 
 	tr_dbg(&buffer_tr, "buffer_alloc()");
@@ -42,16 +42,19 @@ struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t flags, u
 		return NULL;
 	}
 
-	/*
-	 * allocate new buffer, align the allocation size to a cache line for
-	 * the coherent API
-	 */
-	buffer = coherent_init_thread(struct comp_buffer, c);
+	/* allocate new buffer	 */
+	enum mem_zone zone = is_shared ? SOF_MEM_ZONE_RUNTIME_SHARED : SOF_MEM_ZONE_RUNTIME;
+
+	buffer = rzalloc(zone, 0, SOF_MEM_CAPS_RAM, sizeof(*buffer));
+
 	if (!buffer) {
 		tr_err(&buffer_tr, "buffer_alloc(): could not alloc structure");
 		return NULL;
 	}
 
+	CORE_CHECK_STRUCT_INIT(buffer, is_shared);
+
+	buffer->is_shared = is_shared;
 	stream_addr = rballoc_align(0, caps, size, align);
 	if (!stream_addr) {
 		rfree(buffer);
@@ -61,26 +64,11 @@ struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t flags, u
 	}
 
 	/* From here no more uncached access to the buffer object, except its list headers */
-	buffer_c = buffer_acquire(buffer);
-	audio_stream_set_addr(&buffer_c->stream, stream_addr);
-	buffer_init(buffer_c, size, caps);
+	audio_stream_set_addr(&buffer->stream, stream_addr);
+	buffer_init(buffer, size, caps);
 
-	audio_stream_set_underrun(&buffer_c->stream, !!(flags & SOF_BUF_UNDERRUN_PERMITTED));
-	audio_stream_set_overrun(&buffer_c->stream, !!(flags & SOF_BUF_OVERRUN_PERMITTED));
-
-	buffer_release(buffer_c);
-
-	/*
-	 * The buffer hasn't yet been marked as shared, hence buffer_release()
-	 * hasn't written back and invalidated the cache. Therefore we have to
-	 * do this manually now before adding to the lists. Buffer list
-	 * structures are always accessed uncached and they're never modified at
-	 * run-time, i.e. buffers are never relinked. So we have to make sure,
-	 * that what we have written into buffer's cache is in RAM before
-	 * modifying that RAM bypassing cache, and that after this cache is
-	 * re-loaded again.
-	 */
-	dcache_writeback_invalidate_region(uncache_to_cache(buffer), sizeof(*buffer));
+	audio_stream_set_underrun(&buffer->stream, !!(flags & SOF_BUF_UNDERRUN_PERMITTED));
+	audio_stream_set_overrun(&buffer->stream, !!(flags & SOF_BUF_OVERRUN_PERMITTED));
 
 	list_init(&buffer->source_list);
 	list_init(&buffer->sink_list);
@@ -88,9 +76,10 @@ struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t flags, u
 	return buffer;
 }
 
-void buffer_zero(struct comp_buffer __sparse_cache *buffer)
+void buffer_zero(struct comp_buffer *buffer)
 {
 	buf_dbg(buffer, "stream_zero()");
+	CORE_CHECK_STRUCT(buffer);
 
 	bzero(audio_stream_get_addr(&buffer->stream), audio_stream_get_size(&buffer->stream));
 	if (buffer->caps & SOF_MEM_CAPS_DMA)
@@ -99,9 +88,11 @@ void buffer_zero(struct comp_buffer __sparse_cache *buffer)
 					audio_stream_get_size(&buffer->stream));
 }
 
-int buffer_set_size(struct comp_buffer __sparse_cache *buffer, uint32_t size, uint32_t alignment)
+int buffer_set_size(struct comp_buffer *buffer, uint32_t size, uint32_t alignment)
 {
 	void *new_ptr = NULL;
+
+	CORE_CHECK_STRUCT(buffer);
 
 	/* validate request */
 	if (size == 0) {
@@ -135,11 +126,13 @@ int buffer_set_size(struct comp_buffer __sparse_cache *buffer, uint32_t size, ui
 	return 0;
 }
 
-int buffer_set_params(struct comp_buffer __sparse_cache *buffer,
+int buffer_set_params(struct comp_buffer *buffer,
 		      struct sof_ipc_stream_params *params, bool force_update)
 {
 	int ret;
 	int i;
+
+	CORE_CHECK_STRUCT(buffer);
 
 	if (!params) {
 		buf_err(buffer, "buffer_set_params(): !params");
@@ -164,10 +157,11 @@ int buffer_set_params(struct comp_buffer __sparse_cache *buffer,
 	return 0;
 }
 
-bool buffer_params_match(struct comp_buffer __sparse_cache *buffer,
+bool buffer_params_match(struct comp_buffer *buffer,
 			 struct sof_ipc_stream_params *params, uint32_t flag)
 {
 	assert(params);
+	CORE_CHECK_STRUCT(buffer);
 
 	if ((flag & BUFF_PARAMS_FRAME_FMT) &&
 	     audio_stream_get_frm_fmt(&buffer->stream) != params->frame_fmt)
@@ -191,6 +185,8 @@ void buffer_free(struct comp_buffer *buffer)
 		.buffer = buffer,
 	};
 
+	CORE_CHECK_STRUCT(buffer);
+
 	if (!buffer)
 		return;
 
@@ -203,22 +199,10 @@ void buffer_free(struct comp_buffer *buffer)
 	notifier_unregister_all(NULL, buffer);
 
 	rfree(buffer->stream.addr);
-	coherent_free_thread(buffer, c);
+	rfree(buffer);
 }
 
-/*
- * comp_update_buffer_produce() and comp_update_buffer_consume() send
- * NOTIFIER_ID_BUFFER_PRODUCE and NOTIFIER_ID_BUFFER_CONSUME notifier events
- * respectively. The only recipient of those notifications is probes. The
- * target for those notifications is always the current core, therefore notifier
- * callbacks will be called synchronously from notifier_event() calls. Therefore
- * we cannot pass unlocked buffer pointers to probes, because if they try to
- * acquire the buffer, that can cause a deadlock. In general locked objects
- * shouldn't be passed to potentially asynchronous contexts, but here we have no
- * choice but to use our knowledge of the local notifier behaviour and pass
- * locked buffers to notification recipients.
- */
-void comp_update_buffer_produce(struct comp_buffer __sparse_cache *buffer, uint32_t bytes)
+void comp_update_buffer_produce(struct comp_buffer *buffer, uint32_t bytes)
 {
 	struct buffer_cb_transact cb_data = {
 		.buffer = buffer,
@@ -240,8 +224,7 @@ void comp_update_buffer_produce(struct comp_buffer __sparse_cache *buffer, uint3
 
 	audio_stream_produce(&buffer->stream, bytes);
 
-	/* Notifier looks for the pointer value to match it against registration */
-	notifier_event(cache_to_uncache(buffer), NOTIFIER_ID_BUFFER_PRODUCE,
+	notifier_event(buffer, NOTIFIER_ID_BUFFER_PRODUCE,
 		       NOTIFIER_TARGET_CORE_LOCAL, &cb_data, sizeof(cb_data));
 
 #if CONFIG_SOF_LOG_DBG_BUFFER
@@ -257,13 +240,15 @@ void comp_update_buffer_produce(struct comp_buffer __sparse_cache *buffer, uint3
 #endif
 }
 
-void comp_update_buffer_consume(struct comp_buffer __sparse_cache *buffer, uint32_t bytes)
+void comp_update_buffer_consume(struct comp_buffer *buffer, uint32_t bytes)
 {
 	struct buffer_cb_transact cb_data = {
 		.buffer = buffer,
 		.transaction_amount = bytes,
 		.transaction_begin_address = audio_stream_get_rptr(&buffer->stream),
 	};
+
+	CORE_CHECK_STRUCT(buffer);
 
 	/* return if no bytes */
 	if (!bytes) {
@@ -279,7 +264,7 @@ void comp_update_buffer_consume(struct comp_buffer __sparse_cache *buffer, uint3
 
 	audio_stream_consume(&buffer->stream, bytes);
 
-	notifier_event(cache_to_uncache(buffer), NOTIFIER_ID_BUFFER_CONSUME,
+	notifier_event(buffer, NOTIFIER_ID_BUFFER_CONSUME,
 		       NOTIFIER_TARGET_CORE_LOCAL, &cb_data, sizeof(cb_data));
 
 #if CONFIG_SOF_LOG_DBG_BUFFER
@@ -303,30 +288,8 @@ void comp_update_buffer_consume(struct comp_buffer __sparse_cache *buffer, uint3
 void buffer_attach(struct comp_buffer *buffer, struct list_item *head, int dir)
 {
 	struct list_item *list = buffer_comp_list(buffer, dir);
-	struct list_item __sparse_cache *needs_sync;
-	bool further_buffers_exist;
-
-	/*
-	 * There can already be buffers on the target list. If we just link this
-	 * buffer, we modify the first buffer's list header via uncached alias,
-	 * so its cached copy can later be written back, overwriting the
-	 * modified header. FIXME: this is still a problem with different cores.
-	 */
-	further_buffers_exist = !list_is_empty(head);
-	needs_sync = uncache_to_cache(head->next);
-	if (further_buffers_exist)
-		dcache_writeback_region(needs_sync, sizeof(struct list_item));
-	/* The cache line can be prefetched here, invalidate it after prepending */
+	CORE_CHECK_STRUCT(buffer);
 	list_item_prepend(list, head);
-	if (further_buffers_exist)
-		dcache_invalidate_region(needs_sync, sizeof(struct list_item));
-#if CONFIG_INTEL
-	/*
-	 * Until now the buffer object wasn't in cache, but uncached access to it could have
-	 * triggered a cache prefetch. Drop that cache line to avoid using stale data in it.
-	 */
-	dcache_invalidate_region(uncache_to_cache(list), sizeof(*list));
-#endif
 }
 
 /*
@@ -335,32 +298,7 @@ void buffer_attach(struct comp_buffer *buffer, struct list_item *head, int dir)
  */
 void buffer_detach(struct comp_buffer *buffer, struct list_item *head, int dir)
 {
-	struct list_item __sparse_cache *needs_sync_prev, *needs_sync_next;
-	bool buffers_after_exist, buffers_before_exist;
 	struct list_item *buf_list = buffer_comp_list(buffer, dir);
-
-	/*
-	 * There can be more buffers linked together with this one, that will
-	 * still be staying on their respective pipelines and might get used via
-	 * their cached aliases. If we just unlink this buffer, we modify their
-	 * list header via uncached alias, so their cached copy can later be
-	 * written back, overwriting the modified header. FIXME: this is still a
-	 * problem with different cores.
-	 */
-	buffers_after_exist = head != buf_list->next;
-	buffers_before_exist = head != buf_list->prev;
-	needs_sync_prev = uncache_to_cache(buf_list->prev);
-	needs_sync_next = uncache_to_cache(buf_list->next);
-	if (buffers_after_exist)
-		dcache_writeback_region(needs_sync_next, sizeof(struct list_item));
-	if (buffers_before_exist)
-		dcache_writeback_region(needs_sync_prev, sizeof(struct list_item));
-	dcache_writeback_region(uncache_to_cache(buf_list), sizeof(*buf_list));
-	/* buffers before or after can be prefetched here */
+	CORE_CHECK_STRUCT(buffer);
 	list_item_del(buf_list);
-	dcache_invalidate_region(uncache_to_cache(buf_list), sizeof(*buf_list));
-	if (buffers_after_exist)
-		dcache_invalidate_region(needs_sync_next, sizeof(struct list_item));
-	if (buffers_before_exist)
-		dcache_invalidate_region(needs_sync_prev, sizeof(struct list_item));
 }

@@ -58,11 +58,11 @@ set(SOF_IPC_PATH "${SOF_SRC_PATH}/ipc")
 set(SOF_DEBUG_PATH "${SOF_SRC_PATH}/debug")
 set(SOF_MATH_PATH "${SOF_SRC_PATH}/math")
 set(SOF_TRACE_PATH "${SOF_SRC_PATH}/trace")
+set(RIMAGE_TOP ${sof_top_dir}/tools/rimage)
 
 # Save path to rimage configuration files in cmake cache for later use by
 # rimage during the "west sign" stage
-get_filename_component(RIMAGE_CONFIG "../rimage/config" ABSOLUTE)
-set(RIMAGE_CONFIG_PATH ${RIMAGE_CONFIG} CACHE PATH
+set(RIMAGE_CONFIG_PATH ${RIMAGE_TOP}/config CACHE PATH
     " Path to rimage board configuration files")
 
 include(ExternalProject)
@@ -87,7 +87,7 @@ ExternalProject_Add(sof_logger_ep
 )
 
 # default SOF includes
-target_include_directories(SOF INTERFACE ${sof_top_dir}/rimage/src/include)
+target_include_directories(SOF INTERFACE ${RIMAGE_TOP}/src/include)
 target_include_directories(SOF INTERFACE ${SOF_SRC_PATH}/include)
 target_include_directories(SOF INTERFACE ${SOF_SRC_PATH}/arch/${ARCH}/include)
 target_include_directories(SOF INTERFACE ${sof_top_dir}/third_party/include)
@@ -239,6 +239,7 @@ if (CONFIG_SOC_SERIES_NXP_IMX8M)
 		${SOF_DRIVERS_PATH}/imx/sdma.c
 		${SOF_DRIVERS_PATH}/imx/sai.c
 		${SOF_DRIVERS_PATH}/imx/ipc.c
+		${SOF_DRIVERS_PATH}/imx/micfil.c
 		${SOF_DRIVERS_PATH}/imx/interrupt-irqsteer.c
 	)
 
@@ -362,6 +363,9 @@ zephyr_library_sources(
 	lib.c
 )
 
+if(CONFIG_ZEPHYR_DP_SCHEDULER)
+	zephyr_library_sources(${SOF_AUDIO_PATH}/dp_queue.c)
+endif()
 if(CONFIG_SCHEDULE_DMA_SINGLE_CHANNEL AND NOT(CONFIG_DMA_DOMAIN))
 	zephyr_library_sources(${SOF_SRC_PATH}/schedule/dma_single_chan_domain.c)
 endif()
@@ -521,10 +525,19 @@ elseif(CONFIG_IPC_MAJOR_4)
 )
 endif()
 
+if(CONFIG_IPC_MAJOR_3)
 zephyr_library_sources_ifdef(CONFIG_COMP_MODULE_ADAPTER
 	${SOF_AUDIO_PATH}/module_adapter/module_adapter.c
+	${SOF_AUDIO_PATH}/module_adapter/module_adapter_ipc3.c
 	${SOF_AUDIO_PATH}/module_adapter/module/generic.c
 )
+elseif(CONFIG_IPC_MAJOR_4)
+zephyr_library_sources_ifdef(CONFIG_COMP_MODULE_ADAPTER
+	${SOF_AUDIO_PATH}/module_adapter/module_adapter.c
+	${SOF_AUDIO_PATH}/module_adapter/module_adapter_ipc4.c
+	${SOF_AUDIO_PATH}/module_adapter/module/generic.c
+)
+endif()
 
 zephyr_library_sources_ifdef(CONFIG_LIBRARY_MANAGER
 	${SOF_SRC_PATH}/library_manager/lib_manager.c
@@ -567,13 +580,25 @@ zephyr_library_sources_ifdef(CONFIG_COMP_CHAIN_DMA
 	${SOF_AUDIO_PATH}/chain_dma.c
 )
 
-zephyr_library_sources_ifdef(CONFIG_COMP_SRC
-	${SOF_AUDIO_PATH}/src/src_hifi2ep.c
-	${SOF_AUDIO_PATH}/src/src_generic.c
-	${SOF_AUDIO_PATH}/src/src_hifi3.c
-	${SOF_AUDIO_PATH}/src/src_hifi4.c
-	${SOF_AUDIO_PATH}/src/src.c
-)
+if(CONFIG_IPC_MAJOR_3)
+	zephyr_library_sources_ifdef(CONFIG_COMP_SRC
+		${SOF_AUDIO_PATH}/src/src_hifi2ep.c
+		${SOF_AUDIO_PATH}/src/src_generic.c
+		${SOF_AUDIO_PATH}/src/src_hifi3.c
+		${SOF_AUDIO_PATH}/src/src_hifi4.c
+		${SOF_AUDIO_PATH}/src/src.c
+		${SOF_AUDIO_PATH}/src/src_ipc3.c
+	)
+elseif(CONFIG_IPC_MAJOR_4)
+	zephyr_library_sources_ifdef(CONFIG_COMP_SRC
+		${SOF_AUDIO_PATH}/src/src_hifi2ep.c
+		${SOF_AUDIO_PATH}/src/src_generic.c
+		${SOF_AUDIO_PATH}/src/src_hifi3.c
+		${SOF_AUDIO_PATH}/src/src_hifi4.c
+		${SOF_AUDIO_PATH}/src/src.c
+		${SOF_AUDIO_PATH}/src/src_ipc4.c
+	)
+endif()
 
 zephyr_library_sources_ifdef(CONFIG_COMP_BASEFW_IPC4
 	${SOF_AUDIO_PATH}/base_fw.c
@@ -689,7 +714,7 @@ zephyr_library_sources_ifdef(CONFIG_COMP_MUX
 )
 
 zephyr_library_sources_ifdef(CONFIG_COMP_GOOGLE_HOTWORD_DETECT
-	${SOF_AUDIO_PATH}/google_hotword_detect.c
+	${SOF_AUDIO_PATH}/google/google_hotword_detect.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_DTS_CODEC

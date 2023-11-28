@@ -58,13 +58,10 @@ static int set_volume_ipc4(struct vol_data *cd, uint32_t const channel,
 	cd->mvolume[channel] = 0;
 	/* set muted as false*/
 	cd->muted[channel] = false;
-#if CONFIG_COMP_VOLUME_WINDOWS_FADE
+
 	/* ATM there is support for the same ramp for all channels */
-	if (curve_type == IPC4_AUDIO_CURVE_TYPE_WINDOWS_FADE)
-		cd->ramp_type = SOF_VOLUME_WINDOWS_FADE;
-	else
-		cd->ramp_type = SOF_VOLUME_WINDOWS_NO_FADE;
-#endif
+	cd->ramp_type = ipc4_curve_type_convert((enum ipc4_curve_type)curve_type);
+
 	return 0;
 }
 
@@ -89,8 +86,13 @@ static void init_ramp(struct vol_data *cd, uint32_t curve_duration, uint32_t tar
 	/* In IPC4 driver sends curve_duration in hundred of ns - it should be
 	 * converted into ms value required by firmware
 	 */
-	cd->initial_ramp = Q_MULTSR_32X32((int64_t)curve_duration,
-					  Q_CONVERT_FLOAT(1.0 / 10000, 31), 0, 31, 0);
+	if (cd->ramp_type == SOF_VOLUME_WINDOWS_NO_FADE) {
+		cd->initial_ramp = 0;
+		cd->ramp_finished = true;
+	} else {
+		cd->initial_ramp = Q_MULTSR_32X32((int64_t)curve_duration,
+						  Q_CONVERT_FLOAT(1.0 / 10000, 31), 0, 31, 0);
+	}
 
 	if (!cd->initial_ramp) {
 		/* In case when initial ramp time is equal to zero, vol_min and
@@ -366,7 +368,6 @@ int volume_get_config(struct processing_module *mod,
 static int volume_params(struct processing_module *mod)
 {
 	struct sof_ipc_stream_params *params = mod->stream_params;
-	struct comp_buffer __sparse_cache *sink_c, *source_c;
 	struct comp_buffer *sinkb, *sourceb;
 	struct comp_dev *dev = mod->dev;
 
@@ -378,14 +379,10 @@ static int volume_params(struct processing_module *mod)
 
 	/* volume component will only ever have 1 sink buffer */
 	sinkb = list_first_item(&dev->bsink_list, struct comp_buffer, source_list);
-	sink_c = buffer_acquire(sinkb);
-	ipc4_update_buffer_format(sink_c, &mod->priv.cfg.base_cfg.audio_fmt);
-	buffer_release(sink_c);
+	ipc4_update_buffer_format(sinkb, &mod->priv.cfg.base_cfg.audio_fmt);
 
 	sourceb = list_first_item(&dev->bsource_list, struct comp_buffer, sink_list);
-	source_c = buffer_acquire(sourceb);
-	ipc4_update_buffer_format(source_c, &mod->priv.cfg.base_cfg.audio_fmt);
-	buffer_release(source_c);
+	ipc4_update_buffer_format(sourceb, &mod->priv.cfg.base_cfg.audio_fmt);
 
 	return 0;
 }

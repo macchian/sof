@@ -75,7 +75,7 @@ err:
 	return ret;
 }
 
-int module_init(struct processing_module *mod, struct module_interface *interface)
+int module_init(struct processing_module *mod, const struct module_interface *interface)
 {
 	int ret;
 	struct module_data *md = &mod->priv;
@@ -196,8 +196,8 @@ static int validate_config(struct module_config *cfg)
 }
 
 int module_prepare(struct processing_module *mod,
-		   struct sof_source __sparse_cache **sources, int num_of_sources,
-		   struct sof_sink __sparse_cache **sinks, int num_of_sinks)
+		   struct sof_source **sources, int num_of_sources,
+		   struct sof_sink **sinks, int num_of_sinks)
 {
 	int ret;
 	struct module_data *md = &mod->priv;
@@ -222,8 +222,7 @@ int module_prepare(struct processing_module *mod,
 	 * as it has been applied during the procedure - it is safe to
 	 * free it.
 	 */
-	if (md->cfg.data)
-		rfree(md->cfg.data);
+	rfree(md->cfg.data);
 
 	md->cfg.avail = false;
 	md->cfg.data = NULL;
@@ -283,8 +282,8 @@ int module_process_legacy(struct processing_module *mod,
 }
 
 int module_process_sink_src(struct processing_module *mod,
-			    struct sof_source __sparse_cache **sources, int num_of_sources,
-			    struct sof_sink __sparse_cache **sinks, int num_of_sinks)
+			    struct sof_source **sources, int num_of_sources,
+			    struct sof_sink **sinks, int num_of_sinks)
 
 {
 	struct comp_dev *dev = mod->dev;
@@ -519,4 +518,15 @@ int module_unbind(struct processing_module *mod, void *data)
 	if (md->ops->unbind)
 		return md->ops->unbind(mod, data);
 	return 0;
+}
+
+void module_update_buffer_position(struct input_stream_buffer *input_buffers,
+				   struct output_stream_buffer *output_buffers,
+				   uint32_t frames)
+{
+	struct audio_stream *source = input_buffers->data;
+	struct audio_stream *sink = output_buffers->data;
+
+	input_buffers->consumed += audio_stream_frame_bytes(source) * frames;
+	output_buffers->size += audio_stream_frame_bytes(sink) * frames;
 }

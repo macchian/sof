@@ -74,12 +74,28 @@ void ipc_build_trace_posn(struct sof_ipc_dma_trace_posn *posn)
 	posn->rhdr.hdr.size = 0;
 }
 
+#if CONFIG_LIBRARY
+static inline char *ipc4_get_comp_new_data(void)
+{
+	struct ipc *ipc = ipc_get();
+	char *data = (char *)ipc->comp_data + sizeof(struct ipc4_module_init_instance);
+
+	return data;
+}
+#else
+static inline char *ipc4_get_comp_new_data(void)
+{
+	return (char *)MAILBOX_HOSTBOX_BASE;
+}
+#endif
+
 struct comp_dev *comp_new_ipc4(struct ipc4_module_init_instance *module_init)
 {
 	struct comp_ipc_config ipc_config;
 	const struct comp_driver *drv;
 	struct comp_dev *dev;
 	uint32_t comp_id;
+	char *data;
 
 	comp_id = IPC4_COMP_ID(module_init->primary.r.module_id,
 			       module_init->primary.r.instance_id);
@@ -119,15 +135,17 @@ struct comp_dev *comp_new_ipc4(struct ipc4_module_init_instance *module_init)
 	dcache_invalidate_region((__sparse_force void __sparse_cache *)MAILBOX_HOSTBOX_BASE,
 				 MAILBOX_HOSTBOX_SIZE);
 
+	data = ipc4_get_comp_new_data();
 	if (drv->type == SOF_COMP_MODULE_ADAPTER) {
 		const struct ipc_config_process spec = {
-			.data = (const unsigned char *)MAILBOX_HOSTBOX_BASE,
+			.data = (const unsigned char *)data,
 			/* spec_size in IPC4 is in DW. Convert to bytes. */
 			.size = module_init->extension.r.param_block_size * sizeof(uint32_t),
 		};
+
 		dev = drv->ops.create(drv, &ipc_config, (const void *)&spec);
 	} else {
-		dev = drv->ops.create(drv, &ipc_config, (const void *)MAILBOX_HOSTBOX_BASE);
+		dev = drv->ops.create(drv, &ipc_config, (const void *)data);
 	}
 	if (!dev)
 		return NULL;
@@ -241,14 +259,11 @@ static int ipc_pipeline_module_free(uint32_t pipeline_id)
 
 		/* free sink buffer allocated by current component in bind function */
 		list_for_item_safe(list, _list, &icd->cd->bsink_list) {
-			struct comp_buffer __sparse_cache *buffer_c;
 			struct comp_dev *sink;
 
 			buffer = container_of(list, struct comp_buffer, source_list);
 			pipeline_disconnect(icd->cd, buffer, PPL_CONN_DIR_COMP_TO_BUFFER);
-			buffer_c = buffer_acquire(buffer);
-			sink = buffer_c->sink;
-			buffer_release(buffer_c);
+			sink = buffer->sink;
 
 			/* free the buffer only when the sink module has also been disconnected */
 			if (!sink)
@@ -257,14 +272,11 @@ static int ipc_pipeline_module_free(uint32_t pipeline_id)
 
 		/* free source buffer allocated by current component in bind function */
 		list_for_item_safe(list, _list, &icd->cd->bsource_list) {
-			struct comp_buffer __sparse_cache *buffer_c;
 			struct comp_dev *source;
 
 			buffer = container_of(list, struct comp_buffer, sink_list);
 			pipeline_disconnect(icd->cd, buffer, PPL_CONN_DIR_BUFFER_TO_COMP);
-			buffer_c = buffer_acquire(buffer);
-			source = buffer_c->source;
-			buffer_release(buffer_c);
+			source = buffer->source;
 
 			/* free the buffer only when the source module has also been disconnected */
 			if (!source)
@@ -315,29 +327,24 @@ int ipc_pipeline_free(struct ipc *ipc, uint32_t comp_id)
 	return IPC4_SUCCESS;
 }
 
-static struct comp_buffer *ipc4_create_buffer(struct comp_dev *src, struct comp_dev *sink,
-					      uint32_t src_obs, uint32_t src_queue,
+static struct comp_buffer *ipc4_create_buffer(struct comp_dev *src, bool is_shared,
+					      uint32_t buf_size, uint32_t src_queue,
 					      uint32_t dst_queue)
 {
 	struct sof_ipc_buffer ipc_buf;
-	int buf_size;
-
-	/* double it since obs is single buffer size */
-	buf_size = src_obs * 2;
 
 	memset(&ipc_buf, 0, sizeof(ipc_buf));
 	ipc_buf.size = buf_size;
 	ipc_buf.comp.id = IPC4_COMP_ID(src_queue, dst_queue);
 	ipc_buf.comp.pipeline_id = src->ipc_config.pipeline_id;
 	ipc_buf.comp.core = src->ipc_config.core;
-	return buffer_new(&ipc_buf);
+	return buffer_new(&ipc_buf, is_shared);
 }
 
 int ipc_comp_connect(struct ipc *ipc, ipc_pipe_comp_connect *_connect)
 {
 	struct ipc4_module_bind_unbind *bu;
 	struct comp_buffer *buffer;
-	struct comp_buffer __sparse_cache *buffer_c;
 	struct comp_dev *source;
 	struct comp_dev *sink;
 	struct ipc4_base_module_cfg source_src_cfg;
@@ -357,8 +364,12 @@ int ipc_comp_connect(struct ipc *ipc, ipc_pipe_comp_connect *_connect)
 		return IPC4_INVALID_RESOURCE_ID;
 	}
 
-	/* Pass IPC to target core if both modules has the same target core */
-	if (!cpu_is_me(source->ipc_config.core) && source->ipc_config.core == sink->ipc_config.core)
+	bool is_shared = source->ipc_config.core != sink->ipc_config.core;
+
+	/* Pass IPC to target core if the buffer won't be shared and will be used
+	 * on different core
+	 */
+	if (!cpu_is_me(source->ipc_config.core) && !is_shared)
 		return ipc4_process_on_core(source->ipc_config.core, false);
 
 	ret = comp_get_attribute(source, COMP_ATTR_BASE_CONFIG, &source_src_cfg);
@@ -373,7 +384,20 @@ int ipc_comp_connect(struct ipc *ipc, ipc_pipe_comp_connect *_connect)
 		return IPC4_FAILURE;
 	}
 
-	buffer = ipc4_create_buffer(source, sink, source_src_cfg.obs, bu->extension.r.src_queue,
+	/* create a buffer
+	 * in case of LL -> LL or LL->DP
+	 *	size = 2*obs of source module (obs is single buffer size)
+	 * in case of DP -> LL
+	 *	size = 2*ibs of destination (LL) module. DP queue will handle obs of DP module
+	 */
+	uint32_t buf_size;
+
+	if (source->ipc_config.proc_domain == COMP_PROCESSING_DOMAIN_LL)
+		buf_size = source_src_cfg.obs * 2;
+	else
+		buf_size = sink_src_cfg.ibs * 2;
+
+	buffer = ipc4_create_buffer(source, is_shared, buf_size, bu->extension.r.src_queue,
 				    bu->extension.r.dst_queue);
 	if (!buffer) {
 		tr_err(&ipc_tr, "failed to allocate buffer to bind %d to %d", src_id, sink_id);
@@ -381,15 +405,17 @@ int ipc_comp_connect(struct ipc *ipc, ipc_pipe_comp_connect *_connect)
 	}
 
 	/*
-	 * set ibs and obs in sink/src api of created buffer
-	 *	IBS of a buffer is OBS of source component
-	 *	OBS of a buffer is IBS of destination component
+	 * set min_free_space and min_available in sink/src api of created buffer.
+	 * buffer is connected like:
+	 *	source_module -> (sink_ifc) BUFFER (source_ifc) -> sink_module
+	 *
+	 *	source_module needs to set its OBS (out buffer size)
+	 *		as min_free_space in buffer's sink ifc
+	 *	sink_module needs to set its IBS (input buffer size)
+	 *		as min_available in buffer's source ifc
 	 */
-
-	buffer_c = buffer_acquire(buffer);
-	source_set_ibs(audio_stream_get_source(&buffer_c->stream), source_src_cfg.obs);
-	sink_set_obs(audio_stream_get_sink(&buffer_c->stream), sink_src_cfg.ibs);
-	buffer_release(buffer_c);
+	sink_set_min_free_space(audio_stream_get_sink(&buffer->stream), source_src_cfg.obs);
+	source_set_min_available(audio_stream_get_source(&buffer->stream), sink_src_cfg.ibs);
 
 	/*
 	 * Connect and bind the buffer to both source and sink components with the interrupts
@@ -488,10 +514,7 @@ int ipc_comp_disconnect(struct ipc *ipc, ipc_pipe_comp_connect *_connect)
 	buffer_id = IPC4_COMP_ID(bu->extension.r.src_queue, bu->extension.r.dst_queue);
 	list_for_item(sink_list, &src->bsink_list) {
 		struct comp_buffer *buf = container_of(sink_list, struct comp_buffer, source_list);
-		struct comp_buffer __sparse_cache *buf_c = buffer_acquire(buf);
-		bool found = buf_c->id == buffer_id;
-
-		buffer_release(buf_c);
+		bool found = buf->id == buffer_id;
 
 		if (found) {
 			buffer = buf;
@@ -628,7 +651,7 @@ static int ipc4_update_comps_direction(struct ipc *ipc, uint32_t ppl_id)
 	return 0;
 }
 
-int ipc4_pipeline_complete(struct ipc *ipc, uint32_t comp_id)
+int ipc4_pipeline_complete(struct ipc *ipc, uint32_t comp_id, uint32_t cmd)
 {
 	struct ipc_comp_dev *ipc_pipe;
 	int ret;
@@ -647,9 +670,11 @@ int ipc4_pipeline_complete(struct ipc *ipc, uint32_t comp_id)
 	 * pipeline w/o connection to gateway, so direction is not configured in binding phase.
 	 * Need to update direction for such modules when pipeline is completed.
 	 */
-	ret = ipc4_update_comps_direction(ipc, comp_id);
-	if (ret < 0)
-		return ret;
+	if (cmd != SOF_IPC4_PIPELINE_STATE_RESET) {
+		ret = ipc4_update_comps_direction(ipc, comp_id);
+		if (ret < 0)
+			return ret;
+	}
 
 	return ipc_pipeline_complete(ipc, comp_id);
 }
@@ -710,12 +735,57 @@ out:
 	return drv;
 }
 
+#if CONFIG_LIBRARY
+struct ipc4_module_uuid {
+	int module_id;
+	struct sof_uuid uuid;
+};
+
+/* Hardcoded table mapping UUIDs with module ID's. TODO: replace this with a scalable solution */
+static const struct ipc4_module_uuid uuid_map[] = {
+	{0x6, {.a = 0x61bca9a8,	.b = 0x18d0, .c = 0x4a18,
+	       .d = { 0x8e, 0x7b, 0x26, 0x39, 0x21, 0x98, 0x04, 0xb7 }}}, /* gain */
+	{0x2, {.a = 0x39656eb2, .b = 0x3b71, .c = 0x4049,
+	       .d = { 0x8d, 0x3f, 0xf9, 0x2c, 0xd5, 0xc4, 0x3c, 0x09 }}}, /* mixin */
+	{0x3, {.a = 0x3c56505a, .b = 0x24d7, .c = 0x418f,
+		.d = { 0xbd, 0xdc, 0xc1, 0xf5, 0xa3, 0xac, 0x2a, 0xe0 }}}, /* mixout */
+	{0x96, {.a = 0xe2b6031c, .b = 0x47e8, .c = 0x11ed,
+		.d = { 0x07, 0xa9, 0x7f, 0x80, 0x1b, 0x6e, 0xfa, 0x6c }}}, /* host SHM write */
+	{0x98, {.a = 0xdabe8814, .b = 0x47e8, .c = 0x11ed,
+		.d = { 0xa5, 0x8b, 0xb3, 0x09, 0x97, 0x4f, 0xec, 0xce }}}, /* host SHM read */
+	{0x97, {.a = 0x72cee996, .b = 0x39f2, .c = 0x11ed,
+		.d = { 0xa0, 0x8f, 0x97, 0xfc, 0xc4, 0x2e, 0xaa, 0xeb }}}, /* ALSA aplay */
+	{0x99, {.a = 0x66def9f0, .b = 0x39f2, .c = 0x11ed,
+		.d = { 0xf7, 0x89, 0xaf, 0x98, 0xa6, 0x44, 0x0c, 0xc4 }}}, /* ALSA arecord */
+};
+
+static const struct comp_driver *ipc4_library_get_drv(int module_id)
+{
+	const struct ipc4_module_uuid *mod_uuid;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(uuid_map); i++) {
+		mod_uuid = &uuid_map[i];
+
+		if (mod_uuid->module_id == module_id)
+			return ipc4_get_drv((uint8_t *)&mod_uuid->uuid);
+	}
+
+	tr_err(&comp_tr, "ipc4_library_get_drv(): Unsupported module ID %#x\n", module_id);
+	return NULL;
+}
+#endif
+
 const struct comp_driver *ipc4_get_comp_drv(int module_id)
 {
 	struct sof_man_fw_desc *desc = NULL;
 	const struct comp_driver *drv;
 	struct sof_man_module *mod;
 	int entry_index;
+
+#if CONFIG_LIBRARY
+	return ipc4_library_get_drv(module_id);
+#endif
 
 #ifdef RIMAGE_MANIFEST
 	desc = (struct sof_man_fw_desc *)IMR_BOOT_LDR_MANIFEST_BASE;
@@ -839,7 +909,7 @@ void ipc4_base_module_cfg_to_stream_params(const struct ipc4_base_module_cfg *ba
 		params->chmap[i] = (base_cfg->audio_fmt.ch_map >> i * 4) & 0xf;
 }
 
-void ipc4_update_buffer_format(struct comp_buffer __sparse_cache *buf_c,
+void ipc4_update_buffer_format(struct comp_buffer *buf_c,
 			       const struct ipc4_audio_format *fmt)
 {
 	enum sof_ipc_frame valid_fmt, frame_fmt;

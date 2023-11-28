@@ -48,6 +48,7 @@ struct comp_dev;
 struct sof_ipc_stream_posn;
 struct dai_hw_params;
 struct timestamp_data;
+struct dai_ts_data;
 
 /** \addtogroup component_api Component API
  *  @{
@@ -455,8 +456,12 @@ struct comp_ops {
 	 *
 	 * Mandatory for components that allocate DAI.
 	 */
+#if CONFIG_ZEPHYR_NATIVE_DRIVERS
+	int (*dai_ts_get)(struct comp_dev *dev, struct dai_ts_data *tsd);
+#else
 	int (*dai_ts_get)(struct comp_dev *dev,
 			  struct timestamp_data *tsd);
+#endif
 
 	/**
 	 * Bind, atomic - used to notify component of bind event.
@@ -576,7 +581,12 @@ struct comp_dev {
 				  *  2) for all DP tasks
 				  */
 	uint32_t size;		/**< component's allocated size */
-	uint32_t period;	/**< component's processing period */
+	uint32_t period;	/**< component's processing period
+				  *  for LL modules is set to LL pipeline's period
+				  *  for DP module its meaning is "the time the module MUST
+				  *  provide data that allows the following module to perform
+				  *  without glitches"
+				  */
 	uint32_t priority;	/**< component's processing priority */
 	bool is_shared;		/**< indicates whether component is shared
 				  *  across cores
@@ -664,9 +674,7 @@ static inline struct comp_dev *comp_alloc(const struct comp_driver *drv,
 
 	/*
 	 * Use uncached address everywhere to access components to rule out
-	 * multi-core failures. In the future we might decide to switch over to
-	 * the latest coherence API for performance. In that case components
-	 * will be acquired for cached access and released afterwards.
+	 * multi-core failures. TODO: verify if cached alias may be used in some cases
 	 */
 	dev = rzalloc(SOF_MEM_ZONE_RUNTIME_SHARED, 0, SOF_MEM_CAPS_RAM, bytes);
 	if (!dev)
@@ -817,7 +825,7 @@ static inline void component_set_nearest_period_frames(struct comp_dev *current,
  * @param copy_bytes Requested size of data to be available.
  */
 static inline void comp_underrun(struct comp_dev *dev,
-				 struct comp_buffer __sparse_cache *source,
+				 struct comp_buffer *source,
 				 uint32_t copy_bytes)
 {
 	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
@@ -839,7 +847,7 @@ static inline void comp_underrun(struct comp_dev *dev,
  * @param sink Sink buffer.
  * @param copy_bytes Requested size of free space to be available.
  */
-static inline void comp_overrun(struct comp_dev *dev, struct comp_buffer __sparse_cache *sink,
+static inline void comp_overrun(struct comp_dev *dev, struct comp_buffer *sink,
 				uint32_t copy_bytes)
 {
 	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
@@ -864,8 +872,8 @@ static inline void comp_overrun(struct comp_dev *dev, struct comp_buffer __spars
  * @param[in] sink Sink buffer.
  * @param[out] cl Current copy limits.
  */
-void comp_get_copy_limits(struct comp_buffer __sparse_cache *source,
-			  struct comp_buffer __sparse_cache *sink,
+void comp_get_copy_limits(struct comp_buffer *source,
+			  struct comp_buffer *sink,
 			  struct comp_copy_limits *cl);
 
 /**
@@ -877,58 +885,9 @@ void comp_get_copy_limits(struct comp_buffer __sparse_cache *source,
  * @param[in] sink Buffer of sink.
  * @param[out] cl Current copy limits.
  */
-void comp_get_copy_limits_frame_aligned(const struct comp_buffer __sparse_cache *source,
-					const struct comp_buffer __sparse_cache *sink,
+void comp_get_copy_limits_frame_aligned(const struct comp_buffer *source,
+					const struct comp_buffer *sink,
 					struct comp_copy_limits *cl);
-
-/**
- * Version of comp_get_copy_limits that locks both buffers to guarantee
- * consistent state readings.
- *
- * @param[in] source Source buffer.
- * @param[in] sink Sink buffer
- * @param[out] cl Current copy limits.
- */
-static inline
-void comp_get_copy_limits_with_lock(struct comp_buffer *source,
-				    struct comp_buffer *sink,
-				    struct comp_copy_limits *cl)
-{
-	struct comp_buffer __sparse_cache *source_c, *sink_c;
-
-	source_c = buffer_acquire(source);
-	sink_c = buffer_acquire(sink);
-
-	comp_get_copy_limits(source_c, sink_c, cl);
-
-	buffer_release(sink_c);
-	buffer_release(source_c);
-}
-
-/**
- * Version of comp_get_copy_limits_with_lock_frame_aligned that locks both
- * buffers to guarantee consistent state readings and the frames aligned with
- * the requirement.
- *
- * @param[in] source Buffer of source.
- * @param[in] sink Buffer of sink
- * @param[out] cl Current copy limits.
- */
-static inline
-void comp_get_copy_limits_with_lock_frame_aligned(struct comp_buffer *source,
-						  struct comp_buffer *sink,
-						  struct comp_copy_limits *cl)
-{
-	struct comp_buffer __sparse_cache *source_c, *sink_c;
-
-	source_c = buffer_acquire(source);
-	sink_c = buffer_acquire(sink);
-
-	comp_get_copy_limits_frame_aligned(source_c, sink_c, cl);
-
-	buffer_release(sink_c);
-	buffer_release(source_c);
-}
 
 /**
  * Get component state.

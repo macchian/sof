@@ -50,7 +50,7 @@ enum module_processing_mode {
  * \brief Input stream buffer
  */
 struct input_stream_buffer {
-	void __sparse_cache *data; /* data stream buffer */
+	void *data; /* data stream buffer */
 	uint32_t size; /* size of data in the buffer */
 	uint32_t consumed; /* number of bytes consumed by the module */
 
@@ -63,12 +63,13 @@ struct input_stream_buffer {
  * \brief Output stream buffer
  */
 struct output_stream_buffer {
-	void __sparse_cache *data; /* data stream buffer */
+	void *data; /* data stream buffer */
 	uint32_t size; /* size of data in the buffer */
 };
 
 struct comp_dev;
 struct timestamp_data;
+struct dai_ts_data;
 /**
  * \struct module_endpoint_ops
  * \brief Ops relevant only for the endpoint devices such as the host copier or DAI copier.
@@ -120,7 +121,11 @@ struct module_endpoint_ops {
 	 *
 	 * Mandatory for components that allocate DAI.
 	 */
+#if CONFIG_ZEPHYR_NATIVE_DRIVERS
+	int (*dai_ts_get)(struct comp_dev *dev, struct dai_ts_data *tsd);
+#else
 	int (*dai_ts_get)(struct comp_dev *dev, struct timestamp_data *tsd);
+#endif
 
 	/**
 	 * Fetches hardware stream parameters.
@@ -158,8 +163,8 @@ struct module_interface {
 	 * component preparation in .prepare()
 	 */
 	int (*prepare)(struct processing_module *mod,
-		       struct sof_source __sparse_cache **sources, int num_of_sources,
-		       struct sof_sink __sparse_cache **sinks, int num_of_sinks);
+		       struct sof_source **sources, int num_of_sources,
+		       struct sof_sink **sinks, int num_of_sinks);
 
 	/**
 	 * (optional) return true if the module is ready to process
@@ -177,8 +182,8 @@ struct module_interface {
 	 * the module
 	 */
 	bool (*is_ready_to_process)(struct processing_module *mod,
-				    struct sof_source __sparse_cache **sources, int num_of_sources,
-				    struct sof_sink __sparse_cache **sinks, int num_of_sinks);
+				    struct sof_source **sources, int num_of_sources,
+				    struct sof_sink **sinks, int num_of_sinks);
 
 	/**
 	 * Module specific processing procedure
@@ -200,8 +205,8 @@ struct module_interface {
 	 *	- sinks are handlers to sink API struct sink*[]
 	 */
 	int (*process)(struct processing_module *mod,
-		       struct sof_source __sparse_cache **sources, int num_of_sources,
-		       struct sof_sink __sparse_cache **sinks, int num_of_sinks);
+		       struct sof_source **sources, int num_of_sources,
+		       struct sof_sink **sinks, int num_of_sinks);
 
 	/**
 	 * process_audio_stream (depreciated)

@@ -17,7 +17,7 @@
 static int elf_read_sections(struct elf_module *module, bool verbose)
 {
 	Elf32_Ehdr *hdr = &module->hdr;
-	Elf32_Shdr *section = module->section;
+	Elf32_Shdr *section;
 	size_t count;
 	int i, ret;
 	uint32_t valid = (SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR);
@@ -27,7 +27,7 @@ static int elf_read_sections(struct elf_module *module, bool verbose)
 	if (ret < 0) {
 		fprintf(stderr, "error: can't seek to %s section header %d\n",
 			module->elf_file, ret);
-		return ret;
+		return -errno;
 	}
 
 	/* allocate space for each section header */
@@ -41,7 +41,7 @@ static int elf_read_sections(struct elf_module *module, bool verbose)
 	if (count != hdr->shnum) {
 		fprintf(stderr, "error: failed to read %s section header %d\n",
 			module->elf_file, -errno);
-		return -errno;
+		return count < 0 ? -errno : -ENODATA;
 	}
 
 	/* read in strings */
@@ -56,7 +56,7 @@ static int elf_read_sections(struct elf_module *module, bool verbose)
 	if (ret < 0) {
 		fprintf(stderr, "error: can't seek to %s stringss %d\n",
 			module->elf_file, ret);
-		return ret;
+		return -errno;
 	}
 
 	count = fread(module->strings, 1, section[hdr->shstrndx].size,
@@ -64,7 +64,7 @@ static int elf_read_sections(struct elf_module *module, bool verbose)
 	if (count != section[hdr->shstrndx].size) {
 		fprintf(stderr, "error: failed to read %s strings %d\n",
 			module->elf_file, -errno);
-		return -errno;
+		return count < 0 ? -errno : -ENODATA;
 	}
 
 	module->bss_index = elf_find_section(module, ".bss");
@@ -128,7 +128,7 @@ static int elf_read_sections(struct elf_module *module, bool verbose)
 static int elf_read_programs(struct elf_module *module, bool verbose)
 {
 	Elf32_Ehdr *hdr = &module->hdr;
-	Elf32_Phdr *prg = module->prg;
+	Elf32_Phdr *prg;
 	size_t count;
 	int i, ret;
 
@@ -137,7 +137,7 @@ static int elf_read_programs(struct elf_module *module, bool verbose)
 	if (ret < 0) {
 		fprintf(stderr, "error: cant seek to %s program header %d\n",
 			module->elf_file, ret);
-		return ret;
+		return -errno;
 	}
 
 	/* allocate space for programs */
@@ -151,7 +151,7 @@ static int elf_read_programs(struct elf_module *module, bool verbose)
 	if (count != hdr->phnum) {
 		fprintf(stderr, "error: failed to read %s program header %d\n",
 			module->elf_file, -errno);
-		return -errno;
+		return count < 0 ? -errno : -ENODATA;
 	}
 
 	/* check each program */
@@ -191,7 +191,7 @@ static int elf_read_hdr(struct elf_module *module, bool verbose)
 	if (count != 1) {
 		fprintf(stderr, "error: failed to read %s elf header %d\n",
 			module->elf_file, -errno);
-		return -errno;
+		return count < 0 ? -errno : -ENODATA;
 	}
 
 	if (!verbose)
@@ -398,6 +398,7 @@ int elf_find_section(const struct elf_module *module, const char *name)
 	ret = fseek(module->fd, section->off, SEEK_SET);
 	if (ret < 0) {
 		fprintf(stderr, "error: cant seek to string section %d\n", ret);
+		ret = -errno;
 		goto out;
 	}
 
@@ -405,13 +406,20 @@ int elf_find_section(const struct elf_module *module, const char *name)
 	if (count != section->size) {
 		fprintf(stderr, "error: can't read string section %d\n",
 			-errno);
-		ret = -errno;
+		ret = count < 0 ? -errno : -ENODATA;
 		goto out;
 	}
+	buffer[section->size - 1] = '\0';
 
 	/* find section with name */
 	for (i = 0; i < hdr->shnum; i++) {
 		s = &module->section[i];
+		if (s->name >= section->size) {
+			fprintf(stderr, "error: invalid section name string index %d\n", s->name);
+			ret = -EINVAL;
+			goto out;
+		}
+
 		if (!strcmp(name, buffer + s->name)) {
 			ret = i;
 			goto out;
@@ -431,8 +439,8 @@ int elf_read_section(const struct elf_module *module, const char *section_name,
 		     const Elf32_Shdr **dst_section, void **dst_buff)
 {
 	const Elf32_Shdr *section;
-	int section_index = -1;
-	int read;
+	int section_index;
+	int ret;
 
 	section_index = elf_find_section(module, section_name);
 	if (section_index < 0) {
@@ -451,17 +459,25 @@ int elf_read_section(const struct elf_module *module, const char *section_name,
 		return -ENOMEM;
 
 	/* fill buffer with section content */
-	fseek(module->fd, section->off, SEEK_SET);
-	read = fread(*dst_buff, 1, section->size, module->fd);
-	if (read != section->size) {
-		fprintf(stderr,
-			"error: can't read %s section %d\n", section_name,
-			-errno);
-		free(*dst_buff);
-		return -errno;
+	ret = fseek(module->fd, section->off, SEEK_SET);
+	if (ret) {
+		fprintf(stderr, "error: can't seek to %s section %d\n", section_name, -errno);
+		ret = -errno;
+		goto error;
+	}
+
+	ret = fread(*dst_buff, 1, section->size, module->fd);
+	if (ret != section->size) {
+		fprintf(stderr, "error: can't read %s section %d\n", section_name, -errno);
+		ret = ret < 0 ? -errno : -ENODATA;
+		goto error;
 	}
 
 	return section->size;
+
+error:
+	free(*dst_buff);
+	return ret;
 }
 
 int elf_read_module(struct elf_module *module, const char *name, bool verbose)
@@ -479,12 +495,16 @@ int elf_read_module(struct elf_module *module, const char *name, bool verbose)
 
 	/* get file size */
 	ret = fseek(module->fd, 0, SEEK_END);
-	if (ret < 0)
+	if (ret < 0) {
+		ret = -errno;
 		goto hdr_err;
+	}
 	module->file_size = ftell(module->fd);
 	ret = fseek(module->fd, 0, SEEK_SET);
-	if (ret < 0)
+	if (ret < 0) {
+		ret = -errno;
 		goto hdr_err;
+	}
 
 	/* read in elf header */
 	ret = elf_read_hdr(module, verbose);

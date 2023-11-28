@@ -400,8 +400,8 @@ err:
 
 /* just stubs for now. Remove these after making these ops optional in the module adapter */
 static int up_down_mixer_prepare(struct processing_module *mod,
-				 struct sof_source __sparse_cache **sources, int num_of_sources,
-				 struct sof_sink __sparse_cache **sinks, int num_of_sinks)
+				 struct sof_source **sources, int num_of_sources,
+				 struct sof_sink **sinks, int num_of_sinks)
 {
 	struct up_down_mixer_data *cd = module_get_private_data(mod);
 	struct comp_dev *dev = mod->dev;
@@ -456,8 +456,8 @@ up_down_mixer_process(struct processing_module *mod,
 	return 0;
 }
 
-static struct module_interface up_down_mixer_interface = {
-	.init  = up_down_mixer_init,
+static const struct module_interface up_down_mixer_interface = {
+	.init = up_down_mixer_init,
 	.prepare = up_down_mixer_prepare,
 	.process_audio_stream = up_down_mixer_process,
 	.reset = up_down_mixer_reset,

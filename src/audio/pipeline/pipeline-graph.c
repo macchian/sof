@@ -168,18 +168,10 @@ free:
 static void buffer_set_comp(struct comp_buffer *buffer, struct comp_dev *comp,
 			    int dir)
 {
-	struct comp_buffer __sparse_cache *buffer_c = buffer_acquire(buffer);
-
 	if (dir == PPL_CONN_DIR_COMP_TO_BUFFER)
-		buffer_c->source = comp;
+		buffer->source = comp;
 	else
-		buffer_c->sink = comp;
-
-	buffer_release(buffer_c);
-
-	/* The buffer might be marked as shared later, write back the cache */
-	if (!buffer->c.shared)
-		dcache_writeback_invalidate_region(uncache_to_cache(buffer), sizeof(*buffer));
+		buffer->sink = comp;
 }
 
 int pipeline_connect(struct comp_dev *comp, struct comp_buffer *buffer,
@@ -235,7 +227,9 @@ int pipeline_free(struct pipeline *p)
 
 	/* remove from any scheduling */
 	if (p->pipe_task) {
+#if !CONFIG_LIBRARY || UNIT_TEST
 		schedule_task_free(p->pipe_task);
+#endif
 		rfree(p->pipe_task);
 	}
 
@@ -268,7 +262,14 @@ static int pipeline_comp_complete(struct comp_dev *current,
 
 	/* complete component init */
 	current->pipeline = ppl_data->p;
-	current->period = ppl_data->p->period;
+	/* LL module has its period always eq period of the pipeline
+	 * DP period is set to 0 as sink format may not yet been set
+	 * It will be calculated during module prepare operation
+	 * either by the module or to default value based on module's OBS
+	 */
+	if (current->ipc_config.proc_domain == COMP_PROCESSING_DOMAIN_LL)
+		current->period = ppl_data->p->period;
+
 	current->priority = ppl_data->p->priority;
 
 	return pipeline_for_each_comp(current, ctx, dir);
@@ -414,7 +415,6 @@ int pipeline_for_each_comp(struct comp_dev *current,
 	/* run this operation further */
 	list_for_item(clist, buffer_list) {
 		struct comp_buffer *buffer = buffer_from_list(clist, dir);
-		struct comp_buffer __sparse_cache *buffer_c;
 		struct comp_dev *buffer_comp;
 		int err = 0;
 
@@ -438,27 +438,21 @@ int pipeline_for_each_comp(struct comp_dev *current,
 
 		buffer_comp = buffer_get_comp(buffer, dir);
 
-		buffer_c = buffer_acquire(buffer);
-
 		/* execute operation on buffer */
 		if (ctx->buff_func)
-			ctx->buff_func(buffer_c, ctx->buff_data);
+			ctx->buff_func(buffer, ctx->buff_data);
 
 		/* don't go further if this component is not connected */
 		if (buffer_comp &&
 		    (!ctx->skip_incomplete || buffer_comp->pipeline) &&
 		    ctx->comp_func) {
-			buffer_c->walking = true;
-			buffer_release(buffer_c);
+			buffer->walking = true;
 
 			err = ctx->comp_func(buffer_comp, buffer,
 					     ctx, dir);
 
-			buffer_c = buffer_acquire(buffer);
-			buffer_c->walking = false;
+			buffer->walking = false;
 		}
-
-		buffer_release(buffer_c);
 
 		if (err < 0 || err == PPL_STATUS_PATH_STOP)
 			return err;

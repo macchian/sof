@@ -633,8 +633,8 @@ static int cadence_codec_init_process(struct processing_module *mod)
 }
 
 static int cadence_codec_prepare(struct processing_module *mod,
-				 struct sof_source __sparse_cache **sources, int num_of_sources,
-				 struct sof_sink __sparse_cache **sinks, int num_of_sinks)
+				 struct sof_source **sources, int num_of_sources,
+				 struct sof_sink **sinks, int num_of_sinks)
 {
 	int ret = 0, mem_tabs_size;
 	struct comp_dev *dev = mod->dev;
@@ -716,7 +716,6 @@ cadence_codec_process(struct processing_module *mod,
 		      struct output_stream_buffer *output_buffers, int num_output_buffers)
 {
 	struct comp_buffer *local_buff;
-	struct comp_buffer __sparse_cache *buffer_c;
 	struct comp_dev *dev = mod->dev;
 	struct module_data *codec = &mod->priv;
 	struct cadence_codec_data *cd = codec->private;
@@ -747,9 +746,7 @@ cadence_codec_process(struct processing_module *mod,
 
 	/* do not proceed with processing if not enough free space left in the local buffer */
 	local_buff = list_first_item(&mod->sink_buffer_list, struct comp_buffer, sink_list);
-	buffer_c = buffer_acquire(local_buff);
-	free_bytes = audio_stream_get_free(&buffer_c->stream);
-	buffer_release(buffer_c);
+	free_bytes = audio_stream_get_free(&local_buff->stream);
 	if (free_bytes < output_bytes)
 		return -ENOSPC;
 
@@ -879,8 +876,8 @@ cadence_codec_set_configuration(struct processing_module *mod, uint32_t config_i
 	return 0;
 }
 
-static struct module_interface cadence_interface = {
-	.init  = cadence_codec_init,
+static const struct module_interface cadence_interface = {
+	.init = cadence_codec_init,
 	.prepare = cadence_codec_prepare,
 	.process_raw_data = cadence_codec_process,
 	.set_configuration = cadence_codec_set_configuration,

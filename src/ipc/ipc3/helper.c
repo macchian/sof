@@ -454,7 +454,7 @@ int ipc_buffer_new(struct ipc *ipc, const struct sof_ipc_buffer *desc)
 	}
 
 	/* register buffer with pipeline */
-	buffer = buffer_new(desc);
+	buffer = buffer_new(desc, false);
 	if (!buffer) {
 		tr_err(&ipc_tr, "ipc_buffer_new(): buffer_new() failed");
 		return -ENOMEM;
@@ -487,7 +487,6 @@ int ipc_buffer_free(struct ipc *ipc, uint32_t buffer_id)
 	unsigned int core;
 	bool sink_active = false;
 	bool source_active = false;
-	struct comp_buffer __sparse_cache *buffer_c;
 
 	/* check whether buffer exists */
 	ibd = ipc_get_buffer_by_id(ipc, buffer_id);
@@ -498,8 +497,6 @@ int ipc_buffer_free(struct ipc *ipc, uint32_t buffer_id)
 	if (!cpu_is_me(ibd->core))
 		return ipc_process_on_core(ibd->core, false);
 
-	buffer_c = buffer_acquire(ibd->cb);
-
 	/* try to find sink/source components to check if they still exists */
 	list_for_item(clist, &ipc->comp_list) {
 		icd = container_of(clist, struct ipc_comp_dev, list);
@@ -507,20 +504,18 @@ int ipc_buffer_free(struct ipc *ipc, uint32_t buffer_id)
 			continue;
 
 		/* check comp state if sink and source are valid */
-		if (buffer_c->sink == icd->cd) {
-			sink = buffer_c->sink;
-			if (buffer_c->sink->state != COMP_STATE_READY)
+		if (ibd->cb->sink == icd->cd) {
+			sink = ibd->cb->sink;
+			if (ibd->cb->sink->state != COMP_STATE_READY)
 				sink_active = true;
 		}
 
-		if (buffer_c->source == icd->cd) {
-			source = buffer_c->source;
-			if (buffer_c->source->state != COMP_STATE_READY)
+		if (ibd->cb->source == icd->cd) {
+			source = ibd->cb->source;
+			if (ibd->cb->source->state != COMP_STATE_READY)
 				source_active = true;
 		}
 	}
-
-	buffer_release(buffer_c);
 
 	/*
 	 * A buffer could be connected to 2 different pipelines. When one pipeline is freed, the
@@ -572,6 +567,12 @@ static int ipc_comp_to_buffer_connect(struct ipc_comp_dev *comp,
 	tr_dbg(&ipc_tr, "ipc: comp sink %d, source %d -> connect", buffer->id,
 	       comp->id);
 
+#if CONFIG_INCOHERENT
+	if (comp->core != buffer->cb->core) {
+		tr_err(&ipc_tr, "ipc: shared buffers are not supported for IPC3 incoherent architectures");
+		return -ENOTSUP;
+	}
+#endif
 	return comp_buffer_connect(comp->cd, comp->core, buffer->cb,
 				   PPL_CONN_DIR_COMP_TO_BUFFER);
 }
@@ -582,6 +583,12 @@ static int ipc_buffer_to_comp_connect(struct ipc_comp_dev *buffer,
 	tr_dbg(&ipc_tr, "ipc: comp sink %d, source %d -> connect", comp->id,
 	       buffer->id);
 
+#if CONFIG_INCOHERENT
+	if (comp->core != buffer->cb->core) {
+		tr_err(&ipc_tr, "ipc: shared buffers are not supported for IPC3 incoherent architectures");
+		return -ENOTSUP;
+	}
+#endif
 	return comp_buffer_connect(comp->cd, comp->core, buffer->cb,
 				   PPL_CONN_DIR_BUFFER_TO_COMP);
 }

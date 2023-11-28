@@ -107,11 +107,10 @@ jobs:
         IPC_platforms: [
           # - IPC3 default
           imx8 imx8x imx8m,
-          tgl tgl-h,  # UNSUPPORTED! Will be removed
           # - IPC4 default
           mtl, lnl,
           # Temporary testbed for Zephyr development.
-          -i IPC4 tgl tgl-h,
+          tgl tgl-h,
         ]
         build_opts: [""]
         # Sparse matrices are complicated, you must read this page slowly:
@@ -213,11 +212,9 @@ jobs:
         platforms: [
           # - IPC3 default
           imx8 imx8x imx8m,
-          tgl tgl-h,  # UNSUPPORTED! Will be removed
           # - IPC4 default
           mtl,
-          # Very few IPC3 platforms support IPC4 too.
-          -i IPC4 tgl tgl-h,
+          tgl tgl-h,
         ]
         build_opts: [""]
         # Sparse matrices are complicated, see comments on Linux matrix above.
@@ -329,7 +326,18 @@ jobs:
         working-directory: ${{ github.workspace }}/workspace
         run: pip install -r zephyr/scripts/requirements.txt
 
+      # Ninja has been coming and going, see #8250
+      - name: choco install ninja
+        run: |
+          choco install ninja
+          ninja.exe --version
+
       # MSYS2 provides gcc x64_86 toolchain & openssl
+      # Installs in D:/a/_temp/msys64
+      #
+      # Note there is already C:/msys64/ provided by
+      # https://github.com/actions/runner-images/blob/win22/20230918.1/images/win/Windows2022-Readme.md
+      # Is it not good enough? Maybe it could save 20-30s.
       - name: Initialize MSYS2
         uses: msys2/setup-msys2@v2
         with:
@@ -397,7 +405,7 @@ jobs:
           # http://mywiki.wooledge.org/ParsingLs
           for regdir in 'linux-build *mtl' \
                         'windows-build *mtl' \
-                        'windows-build *-i IPC4 tgl tgl-h'; do
+                        'windows-build *tgl tgl-h'; do
             find . -maxdepth 1 | grep -q "\./${regdir}\$" ||
               { >&2 printf 'Missing %s\n' "${regdir}"; exit 1; }
           done

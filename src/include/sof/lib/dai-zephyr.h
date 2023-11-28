@@ -33,6 +33,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <zephyr/device.h>
+#include <zephyr/drivers/dai.h>
 
 /** \addtogroup sof_dai_drivers DAI Drivers
  *  DAI Drivers API specification.
@@ -50,30 +51,6 @@ struct dai {
 	const struct device *dev;
 	const struct dai_data *dd;
 	struct k_spinlock lock;		/* protect properties */
-};
-
-struct timestamp_cfg {
-	uint32_t walclk_rate; /* Rate in Hz, e.g. 19200000 */
-	int type; /* SSP, DMIC, HDA, etc. */
-	int direction; /* Playback, capture */
-	int index; /* For SSPx to select correct timestamp register */
-	int dma_id; /* GPDMA id*/
-	int dma_chan_index; /* Used GPDMA channel */
-	int dma_chan_count; /* Channels in single GPDMA */
-};
-
-struct timestamp_data {
-	uint64_t walclk; /* Wall clock */
-	uint64_t sample; /* Sample count */
-	uint32_t walclk_rate; /* Rate in Hz, e.g. 19200000 */
-};
-
-struct timestamp_ops {
-	int (*ts_config)(struct dai *dai, struct timestamp_cfg *cfg);
-	int (*ts_start)(struct dai *dai, struct timestamp_cfg *cfg);
-	int (*ts_stop)(struct dai *dai, struct timestamp_cfg *cfg);
-	int (*ts_get)(struct dai *dai, struct timestamp_cfg *cfg,
-		      struct timestamp_data *tsd);
 };
 
 union hdalink_cfg {
@@ -141,7 +118,7 @@ struct dai_data {
 	struct comp_dev *dai_dev;
 	struct comp_buffer *dma_buffer;
 	struct comp_buffer *local_buffer;
-	struct timestamp_cfg ts_config;
+	struct dai_ts_cfg ts_config;
 	struct dai *dai;
 	struct dma *dma;
 	struct dai_group *group;		/* NULL if no group assigned */

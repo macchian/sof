@@ -36,7 +36,7 @@
 LOG_MODULE_DECLARE(ipc, CONFIG_SOF_LOG_LEVEL);
 
 /* create a new component in the pipeline */
-struct comp_buffer *buffer_new(const struct sof_ipc_buffer *desc)
+struct comp_buffer *buffer_new(const struct sof_ipc_buffer *desc, bool is_shared)
 {
 	struct comp_buffer *buffer;
 
@@ -44,7 +44,8 @@ struct comp_buffer *buffer_new(const struct sof_ipc_buffer *desc)
 		desc->size, desc->comp.pipeline_id, desc->comp.id, desc->flags);
 
 	/* allocate buffer */
-	buffer = buffer_alloc(desc->size, desc->caps, desc->flags, PLATFORM_DCACHE_ALIGN);
+	buffer = buffer_alloc(desc->size, desc->caps, desc->flags, PLATFORM_DCACHE_ALIGN,
+			      is_shared);
 	if (buffer) {
 		buffer->id = desc->comp.id;
 		buffer->pipeline_id = desc->comp.pipeline_id;
@@ -79,7 +80,7 @@ int32_t ipc_comp_pipe_id(const struct ipc_comp_dev *icd)
  */
 static void comp_update_params(uint32_t flag,
 			       struct sof_ipc_stream_params *params,
-			       struct comp_buffer __sparse_cache *buffer)
+			       struct comp_buffer *buffer)
 {
 	if (flag & BUFF_PARAMS_FRAME_FMT)
 		params->frame_fmt = audio_stream_get_frm_fmt(&buffer->stream);
@@ -103,7 +104,6 @@ int comp_verify_params(struct comp_dev *dev, uint32_t flag,
 	struct list_item *clist;
 	struct comp_buffer *sinkb;
 	struct comp_buffer *buf;
-	struct comp_buffer __sparse_cache *buf_c;
 	int dir = dev->direction;
 
 	if (!params) {
@@ -127,22 +127,18 @@ int comp_verify_params(struct comp_dev *dev, uint32_t flag,
 					      struct comp_buffer,
 					      source_list);
 
-		buf_c = buffer_acquire(buf);
-
 		/* update specific pcm parameter with buffer parameter if
 		 * specific flag is set.
 		 */
-		comp_update_params(flag, params, buf_c);
+		comp_update_params(flag, params, buf);
 
 		/* overwrite buffer parameters with modified pcm
 		 * parameters
 		 */
-		buffer_set_params(buf_c, params, BUFFER_UPDATE_FORCE);
+		buffer_set_params(buf, params, BUFFER_UPDATE_FORCE);
 
 		/* set component period frames */
-		component_set_nearest_period_frames(dev, audio_stream_get_rate(&buf_c->stream));
-
-		buffer_release(buf_c);
+		component_set_nearest_period_frames(dev, audio_stream_get_rate(&buf->stream));
 	} else {
 		/* for other components we iterate over all downstream buffers
 		 * (for playback) or upstream buffers (for capture).
@@ -151,19 +147,15 @@ int comp_verify_params(struct comp_dev *dev, uint32_t flag,
 
 		list_for_item(clist, buffer_list) {
 			buf = buffer_from_list(clist, dir);
-			buf_c = buffer_acquire(buf);
-			comp_update_params(flag, params, buf_c);
-			buffer_set_params(buf_c, params, BUFFER_UPDATE_FORCE);
-			buffer_release(buf_c);
+			comp_update_params(flag, params, buf);
+			buffer_set_params(buf, params, BUFFER_UPDATE_FORCE);
 		}
 
 		/* fetch sink buffer in order to calculate period frames */
 		sinkb = list_first_item(&dev->bsink_list, struct comp_buffer,
 					source_list);
 
-		buf_c = buffer_acquire(sinkb);
-		component_set_nearest_period_frames(dev, audio_stream_get_rate(&buf_c->stream));
-		buffer_release(buf_c);
+		component_set_nearest_period_frames(dev, audio_stream_get_rate(&sinkb->stream));
 	}
 
 	return 0;
@@ -174,8 +166,8 @@ int comp_buffer_connect(struct comp_dev *comp, uint32_t comp_core,
 {
 	/* check if it's a connection between cores */
 	if (buffer->core != comp_core) {
-		/* set the buffer as a coherent object */
-		coherent_shared_thread(buffer, c);
+		/* buffer must be shared */
+		assert(buffer->is_shared);
 
 		if (!comp->is_shared)
 			comp_make_shared(comp);
@@ -290,10 +282,8 @@ int ipc_comp_free(struct ipc *ipc, uint32_t comp_id)
 	irq_local_disable(flags);
 	list_for_item_safe(clist, tmp, &icd->cd->bsource_list) {
 		struct comp_buffer *buffer = container_of(clist, struct comp_buffer, sink_list);
-		struct comp_buffer __sparse_cache *buffer_c = buffer_acquire(buffer);
 
-		buffer_c->sink = NULL;
-		buffer_release(buffer_c);
+		buffer->sink = NULL;
 		/* Also if it isn't shared - we are about to modify uncached data */
 		dcache_writeback_invalidate_region(uncache_to_cache(buffer),
 						   sizeof(*buffer));
@@ -303,10 +293,8 @@ int ipc_comp_free(struct ipc *ipc, uint32_t comp_id)
 
 	list_for_item_safe(clist, tmp, &icd->cd->bsink_list) {
 		struct comp_buffer *buffer = container_of(clist, struct comp_buffer, source_list);
-		struct comp_buffer __sparse_cache *buffer_c = buffer_acquire(buffer);
 
-		buffer_c->source = NULL;
-		buffer_release(buffer_c);
+		buffer->source = NULL;
 		/* Also if it isn't shared - we are about to modify uncached data */
 		dcache_writeback_invalidate_region(uncache_to_cache(buffer),
 						   sizeof(*buffer));

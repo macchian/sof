@@ -21,6 +21,15 @@ config IMX_ESAI
 	help
 	  Select this to enable support for i.MX ESAI IP.
 
+config IMX_MICFIL
+	bool "i.MX MICFIL PDM driver"
+	default n
+	depends on IMX
+	help
+	  Select this to enable support for i.MX MICFIL PDM IP. This block implements
+	  the required digital interface to provide a 24-bits audio signal from a PDM
+	  microphone bitstream in a configurable output sampling rate
+
 config IMX_INTERRUPT_IRQSTEER
 	bool
 	default n
@@ -36,7 +45,7 @@ config IMX_INTERRUPT_GENERIC
 	  It enables NXP platforms-specific features.
 
 config HAVE_SDMA_FIRMWARE
-	bool
+	bool "Enable SDMA firmware load"
 	default n
 	help
 	  Select this to load SDMA firmware to enable additional functionality

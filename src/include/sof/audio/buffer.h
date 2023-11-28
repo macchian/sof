@@ -133,9 +133,9 @@ extern struct tr_ctx buffer_tr;
  * 5) write back cached data and release lock using uncache pointer.
  */
 struct comp_buffer {
-	struct coherent c;
-
 	/* data buffer */
+	CORE_CHECK_STRUCT_FIELD;
+
 	struct audio_stream stream;
 
 	/* configuration */
@@ -144,6 +144,7 @@ struct comp_buffer {
 	uint32_t caps;
 	uint32_t core;
 	struct tr_ctx tctx;			/* trace settings */
+	bool is_shared;			/* buffer structure is shared between 2 cores */
 
 	/* connected components */
 	struct comp_dev *source;	/* source component */
@@ -162,7 +163,7 @@ struct comp_buffer {
 
 /* Only to be used for synchronous same-core notifications! */
 struct buffer_cb_transact {
-	struct comp_buffer __sparse_cache *buffer;
+	struct comp_buffer *buffer;
 	uint32_t transaction_amount;
 	void *transaction_begin_address;
 };
@@ -188,54 +189,37 @@ struct buffer_cb_free {
 	} while (0)
 
 /* pipeline buffer creation and destruction */
-struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t flags, uint32_t align);
-struct comp_buffer *buffer_new(const struct sof_ipc_buffer *desc);
-int buffer_set_size(struct comp_buffer __sparse_cache *buffer, uint32_t size, uint32_t alignment);
+struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t flags, uint32_t align,
+				 bool is_shared);
+struct comp_buffer *buffer_new(const struct sof_ipc_buffer *desc, bool is_shared);
+int buffer_set_size(struct comp_buffer *buffer, uint32_t size, uint32_t alignment);
 void buffer_free(struct comp_buffer *buffer);
-void buffer_zero(struct comp_buffer __sparse_cache *buffer);
+void buffer_zero(struct comp_buffer *buffer);
 
 /* called by a component after producing data into this buffer */
-void comp_update_buffer_produce(struct comp_buffer __sparse_cache *buffer, uint32_t bytes);
+void comp_update_buffer_produce(struct comp_buffer *buffer, uint32_t bytes);
 
 /* called by a component after consuming data from this buffer */
-void comp_update_buffer_consume(struct comp_buffer __sparse_cache *buffer, uint32_t bytes);
+void comp_update_buffer_consume(struct comp_buffer *buffer, uint32_t bytes);
 
-int buffer_set_params(struct comp_buffer __sparse_cache *buffer,
+int buffer_set_params(struct comp_buffer *buffer,
 		      struct sof_ipc_stream_params *params, bool force_update);
 
-bool buffer_params_match(struct comp_buffer __sparse_cache *buffer,
+bool buffer_params_match(struct comp_buffer *buffer,
 			 struct sof_ipc_stream_params *params, uint32_t flag);
 
-static inline void buffer_stream_invalidate(struct comp_buffer __sparse_cache *buffer,
-					    uint32_t bytes)
+static inline void buffer_stream_invalidate(struct comp_buffer *buffer, uint32_t bytes)
 {
-	if (!is_coherent_shared(buffer, c))
-		return;
-
-	audio_stream_invalidate(&buffer->stream, bytes);
+	if (buffer->is_shared)
+		audio_stream_invalidate(&buffer->stream, bytes);
 }
 
-static inline void buffer_stream_writeback(struct comp_buffer __sparse_cache *buffer,
-					   uint32_t bytes)
+static inline void buffer_stream_writeback(struct comp_buffer *buffer, uint32_t bytes)
 {
-	if (!is_coherent_shared(buffer, c))
-		return;
-
-	audio_stream_writeback(&buffer->stream, bytes);
+	if (buffer->is_shared)
+		audio_stream_writeback(&buffer->stream, bytes);
 }
 
-__must_check static inline struct comp_buffer __sparse_cache *buffer_acquire(
-	struct comp_buffer *buffer)
-{
-	struct coherent __sparse_cache *c = coherent_acquire_thread(&buffer->c, sizeof(*buffer));
-
-	return attr_container_of(c, struct comp_buffer __sparse_cache, c, __sparse_cache);
-}
-
-static inline void buffer_release(struct comp_buffer __sparse_cache *buffer)
-{
-	coherent_release_thread(&buffer->c, sizeof(*buffer));
-}
 
 /*
  * Attach a new buffer at the beginning of the list. Note, that "head" must
@@ -255,14 +239,11 @@ void buffer_detach(struct comp_buffer *buffer, struct list_item *head, int dir);
 
 static inline struct comp_dev *buffer_get_comp(struct comp_buffer *buffer, int dir)
 {
-	struct comp_buffer __sparse_cache *buffer_c = buffer_acquire(buffer);
-	struct comp_dev *comp = dir == PPL_DIR_DOWNSTREAM ? buffer_c->sink :
-		buffer_c->source;
-	buffer_release(buffer_c);
+	struct comp_dev *comp = dir == PPL_DIR_DOWNSTREAM ? buffer->sink : buffer->source;
 	return comp;
 }
 
-static inline void buffer_reset_pos(struct comp_buffer __sparse_cache *buffer, void *data)
+static inline void buffer_reset_pos(struct comp_buffer *buffer, void *data)
 {
 	/* reset rw pointers and avail/free bytes counters */
 	audio_stream_reset(&buffer->stream);
@@ -272,7 +253,7 @@ static inline void buffer_reset_pos(struct comp_buffer __sparse_cache *buffer, v
 }
 
 /* Run-time buffer re-configuration calls this too, so it must use cached access */
-static inline void buffer_init(struct comp_buffer __sparse_cache *buffer,
+static inline void buffer_init(struct comp_buffer *buffer,
 			       uint32_t size, uint32_t caps)
 {
 	buffer->caps = caps;
@@ -281,7 +262,7 @@ static inline void buffer_init(struct comp_buffer __sparse_cache *buffer,
 	audio_stream_init(&buffer->stream, buffer->stream.addr, size);
 }
 
-static inline void buffer_reset_params(struct comp_buffer __sparse_cache *buffer, void *data)
+static inline void buffer_reset_params(struct comp_buffer *buffer, void *data)
 {
 	buffer->hw_params_configured = false;
 }
