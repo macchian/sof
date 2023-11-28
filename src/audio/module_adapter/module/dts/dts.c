@@ -25,6 +25,8 @@ static void *dts_effect_allocate_codec_memory(void *mod_void, unsigned int lengt
 	struct comp_dev *dev = mod->dev;
 	void *pMem;
 
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
+
 	comp_dbg(dev, "dts_effect_allocate_codec_memory() start");
 
 	pMem = module_allocate_memory(mod, (uint32_t)length, (uint32_t)alignment);
@@ -41,6 +43,8 @@ static void dts_effect_free_codec_memory(void *mod_void, void *pMem)
 {
 	struct processing_module *mod = mod_void;
 	struct comp_dev *dev = mod->dev;
+
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
 
 	comp_dbg(dev, "dts_effect_free_codec_memory() start");
 
@@ -84,6 +88,8 @@ static int dts_effect_populate_buffer_configuration(struct comp_dev *dev,
 	DtsSofInterfaceBufferLayout buffer_layout;
 	DtsSofInterfaceBufferFormat buffer_format;
 	unsigned int buffer_fmt, frame_fmt, rate, channels;
+
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
 
 	comp_dbg(dev, "dts_effect_populate_buffer_configuration() start");
 
@@ -144,6 +150,8 @@ static int dts_codec_init(struct processing_module *mod)
 	DtsSofInterfaceVersionInfo interface_version;
 	DtsSofInterfaceVersionInfo sdk_version;
 
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
+
 	comp_dbg(dev, "dts_codec_init() start");
 
 	dts_result = dtsSofInterfaceInit((DtsSofInterfaceInst **)&(codec->private),
@@ -190,6 +198,8 @@ static int dts_codec_prepare(struct processing_module *mod,
 	DtsSofInterfaceBufferConfiguration buffer_configuration;
 	DtsSofInterfaceResult dts_result;
 
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
+
 	comp_dbg(dev, "dts_codec_prepare() start");
 
 	ret = dts_effect_populate_buffer_configuration(dev, &buffer_configuration);
@@ -224,6 +234,8 @@ static int dts_codec_init_process(struct processing_module *mod)
 	struct module_data *codec = &mod->priv;
 	DtsSofInterfaceResult dts_result;
 
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
+
 	comp_dbg(dev, "dts_codec_init_process() start");
 
 	dts_result = dtsSofInterfaceInitProcess(codec->private);
@@ -251,6 +263,8 @@ dts_codec_process(struct processing_module *mod,
 	struct module_data *codec = &mod->priv;
 	DtsSofInterfaceResult dts_result;
 	unsigned int bytes_processed = 0;
+
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
 
 	/* Proceed only if we have enough data to fill the module buffer completely */
 	if (input_buffers[0].size < codec->mpd.in_buff_size) {
@@ -306,6 +320,8 @@ static int dts_codec_apply_config(struct processing_module *mod)
 	uint32_t i;
 	uint32_t param_number = 0;
 	DtsSofInterfaceResult dts_result;
+
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
 
 	comp_dbg(dev, "dts_codec_apply_config() start");
 
@@ -380,6 +396,8 @@ static int dts_codec_reset(struct processing_module *mod)
 	struct module_data *codec = &mod->priv;
 	DtsSofInterfaceResult dts_result;
 
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
+
 	comp_dbg(dev, "dts_codec_reset() start");
 
 	dts_result = dtsSofInterfaceReset(codec->private);
@@ -399,6 +417,8 @@ static int dts_codec_free(struct processing_module *mod)
 	struct comp_dev *dev = mod->dev;
 	struct module_data *codec = &mod->priv;
 	DtsSofInterfaceResult dts_result;
+
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
 
 	comp_dbg(dev, "dts_codec_free() start");
 
@@ -424,6 +444,8 @@ dts_codec_set_configuration(struct processing_module *mod, uint32_t config_id,
 	struct module_data *md = &mod->priv;
 	struct comp_dev *dev = mod->dev;
 	int ret;
+
+	LOG_MODULE_DECLARE(component, CONFIG_SOF_LOG_LEVEL);
 
 	ret = module_set_configuration(mod, config_id, pos, data_offset_size, fragment,
 				       fragment_size, response, response_size);
