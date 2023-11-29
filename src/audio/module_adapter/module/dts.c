@@ -15,6 +15,8 @@ DECLARE_TR_CTX(dts_tr, SOF_UUID(dts_uuid), LOG_LEVEL_INFO);
 
 #define MAX_EXPECTED_DTS_CONFIG_DATA_SIZE 8192
 
+LOG_MODULE_REGISTER(dts, CONFIG_SOF_LOG_LEVEL);
+
 static void *dts_effect_allocate_codec_memory(void *mod_void, unsigned int length,
 					      unsigned int alignment)
 {
@@ -414,13 +416,24 @@ dts_codec_set_configuration(struct processing_module *mod, uint32_t config_id,
 
 	ret = module_set_configuration(mod, config_id, pos, data_offset_size, fragment,
 				       fragment_size, response, response_size);
-	if (ret < 0)
+	if (ret < 0) {
+		comp_err(dev, "dts_codec_set_configuration(): error %x from module_set_configuration()", ret);
 		return ret;
-
+	}
 	/* return if more fragments are expected or if the module is not prepared */
 	if ((pos != MODULE_CFG_FRAGMENT_LAST && pos != MODULE_CFG_FRAGMENT_SINGLE) ||
-	    md->state < MODULE_INITIALIZED)
+	    md->state < MODULE_INITIALIZED) {
+		comp_err(dev, "dts_codec_set_configuration(): pos %d error", pos);
 		return 0;
+	}
+
+#if CONFIG_IPC_MAJOR_3
+	// return if the module is not prepared
+	if (md->state < MODULE_INITIALIZED) {
+		comp_err(dev, "dts_codec_set_configuration(): state %d error", md->state);
+		return 0;
+	}
+#endif
 
 	/* whole configuration received, apply it now */
 	ret = dts_codec_apply_config(mod);
