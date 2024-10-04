@@ -222,7 +222,12 @@ DAI_ADD(sof/pipe-mixer-volume-dai-playback.m4,
 # capture DAI is ALH(UAJ_LINK PIN3) using 2 periods
 # Buffers use s24le format, with 48 frame per 1000us on core 0 with priority 0
 DAI_ADD(sof/pipe-dai-capture.m4,
+ifdef(`CS42L43', `
+	2, ALH, eval(UAJ_LINK * 256 + 4), `SDW'eval(UAJ_LINK)`-Capture-SimpleJack',
+',
+`
 	2, ALH, eval(UAJ_LINK * 256 + 3), `SDW'eval(UAJ_LINK)`-Capture',
+')
 	PIPELINE_SINK_2, 2, s24le,
 	1000, 0, 0, SCHEDULE_TIME_DOMAIN_TIMER)
 
@@ -271,7 +276,12 @@ ifdef(`NOAMP', `',
 # playback DAI is ALH(AMP_1_LINK PIN2/AMP_2_LINK PIN2) using 2 periods
 # Buffers use s24le format, with 48 frame per 1000us on core 0 with priority 0
 DAI_ADD(sof/pipe-dai-playback.m4,
+ifdef(`CS42L43', `
+	3, ALH, eval(AMP_1_LINK * 256 + 5), `SDW'eval(AMP_1_LINK)`-Playback-SmartAmp',
+',
+`
 	3, ALH, eval(AMP_1_LINK * 256 + 2), `SDW'eval(AMP_1_LINK)`-Playback',
+')
 	PIPELINE_SOURCE_3, 2, s24le,
 	1000, 0, 0, SCHEDULE_TIME_DOMAIN_TIMER)
 
@@ -299,7 +309,12 @@ ifdef(`NO_LOCAL_MIC', `',
 # capture DAI is ALH(MIC_LINK PIN2) using 2 periods
 # Buffers use s24le format, with 48 frame per 1000us on core 0 with priority 0
 DAI_ADD(sof/pipe-dai-capture.m4,
+ifdef(`CS42L43', `
+	5, ALH, eval(MIC_LINK * 256 + 3), `SDW'eval(MIC_LINK)`-Capture-SmartMic',
+',
+`
 	5, ALH, eval(MIC_LINK * 256 + 2), `SDW'eval(MIC_LINK)`-Capture',
+')
 	PIPELINE_SINK_5, 2, s24le,
 	1000, 0, 0, SCHEDULE_TIME_DOMAIN_TIMER)
 ')
@@ -365,23 +380,44 @@ ifdef(`NOJACK', `',
 DAI_CONFIG(ALH, eval(UAJ_LINK * 256 + 2), 0, `SDW'eval(UAJ_LINK)`-Playback',
 	ALH_CONFIG(ALH_CONFIG_DATA(ALH, eval(UAJ_LINK * 256 + 2), 48000, 2)))
 
+ifdef(`CS42L43', `
+#ALH UAJ_LINK Pin4 (ID: 2)
+DAI_CONFIG(ALH, eval(UAJ_LINK * 256 + 4), 1, `SDW'eval(UAJ_LINK)`-Capture-SimpleMic',
+	ALH_CONFIG(ALH_CONFIG_DATA(ALH, eval(UAJ_LINK * 256 + 4), 48000, 2)))
+',
+`
 #ALH UAJ_LINK Pin3 (ID: 1)
 DAI_CONFIG(ALH, eval(UAJ_LINK * 256 + 3), 1, `SDW'eval(UAJ_LINK)`-Capture',
 	ALH_CONFIG(ALH_CONFIG_DATA(ALH, eval(UAJ_LINK * 256 + 3), 48000, 2)))
 ')
+')
 
 ifdef(`NOAMP', `',
+`
+ifdef(`CS42L43', `
+#ALH AMP_1_LINK Pin5 (ID: 3)
+DAI_CONFIG(ALH, eval(AMP_1_LINK * 256 + 5), 2, `SDW'eval(AMP_1_LINK)`-Playback-SmartAmp',
+	ALH_CONFIG(ALH_CONFIG_DATA(ALH, eval(AMP_1_LINK * 256 + 5), 48000, 2)))
+',
 `
 #ALH AMP_1_LINK Pin2 (ID: 2)
 DAI_CONFIG(ALH, eval(AMP_1_LINK * 256 + 2), 2, `SDW'eval(AMP_1_LINK)`-Playback',
 	ALH_CONFIG(ALH_CONFIG_DATA(ALH, eval(AMP_1_LINK * 256 + 2), 48000, 2)))
 ')
+')
 
 ifdef(`NO_LOCAL_MIC', `',
+`
+ifdef(`CS42L43', `
+#ALH UAJ_LINK Pin3 (ID: 1)
+DAI_CONFIG(ALH, eval(UAJ_LINK * 256 + 3), 1, `SDW'eval(MIC_LINK)`-Capture-SmartMic',
+	ALH_CONFIG(ALH_CONFIG_DATA(ALH, eval(UAJ_LINK * 256 + 3), 48000, 2)))
+',
 `
 #ALH MIC_LINK Pin2 (ID: 4)
 DAI_CONFIG(ALH, eval(MIC_LINK * 256 + 2), 4, `SDW'eval(MIC_LINK)`-Capture',
 	ALH_CONFIG(ALH_CONFIG_DATA(ALH, eval(MIC_LINK * 256 + 2), 48000, 2)))
+')
 ')
 
 ifdef(`NOHDMI', `',
