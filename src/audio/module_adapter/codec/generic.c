@@ -11,7 +11,7 @@
  *
  */
 
-#include <sof/audio/codec_adapter/codec/generic.h>
+#include <sof/audio/module_adapter/codec/generic.h>
 
 /*****************************************************************************/
 /* Local helper functions						     */

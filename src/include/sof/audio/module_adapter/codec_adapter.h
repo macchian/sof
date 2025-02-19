@@ -8,7 +8,7 @@
 #ifndef __SOF_AUDIO_CODEC_ADAPTER__
 #define __SOF_AUDIO_CODEC_ADAPTER__
 
-#include <sof/audio/codec_adapter/codec/generic.h>
+#include <sof/audio/module_adapter/codec/generic.h>
 
 #define MAX_BLOB_SIZE 8192
 /*****************************************************************************/
